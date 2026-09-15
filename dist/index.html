@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SLC-SCORE - tests techniques</title>
+<style>
+  :root { color-scheme: light; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 32px; max-width: 800px; background: #fff; color: #1a1a1a; }
+  a { color: #1c6dd0; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { color: #777; margin: 0 0 24px; }
+  ol { padding-left: 20px; }
+  li { margin: 0 0 16px; }
+  li a { font-weight: 600; }
+  li .st { font-size: 12px; color: #888; }
+  li.todo a { pointer-events: none; opacity: .45; }
+  code { background: #f0f0f0; padding: 1px 5px; border-radius: 4px; }
+  .box { border: 1px solid #ddd; border-radius: 8px; padding: 14px 16px; margin: 24px 0; font-size: 13px; background: #fafafa; }
+</style>
+</head>
+<body>
+
+<h1>SLC-SCORE - tests techniques</h1>
+<p class="sub">Section 11 du cahier des charges. Chaque test est isolé dans sa page ; la plomberie EDF est partagée dans <code>../lib/</code>.</p>
+
+<div class="box">
+  <b>Lancer le serveur</b> (gère les requêtes HTTP Range, comme l'archi cible) depuis la racine du projet :
+  <br><code>python3 serve.py</code>
+  <br>puis ouvrir <code>http://localhost:8000/tests/</code>
+  <br><span style="opacity:.6">(pas <code>python3 -m http.server</code> : il ne gère pas Range et renverrait les 641 Mo à chaque fenêtre)</span>
+  <br><br>
+  Fichiers attendus à la racine : <code>enregistement-nox-complet.edf</code>, <code>scoring.json</code>.
+</div>
+
+<ol>
+  <li>
+    <a href="test-1-affichage-nox.html">Test 1 - Affichage des tracés et du codage façon NOX</a>
+    <div class="st">Tracé respiratoire d'abord. Fidélité visée : équivalence clinique (à valider).</div>
+  </li>
+  <li>
+    <a href="test-2-ecran-correction.html">Test 2 - Les deux options d'écran de correction (§6.6)</a>
+    <div class="st">Option A superposition / Option B vues synchronisées. Référence vs candidat simulé.</div>
+  </li>
+  <li>
+    <a href="test-3-comparaison.html">Test 3 - Correction simplifiée par comparaison</a>
+    <div class="st">Appariement référence / candidat par recouvrement (IoU), apparié / manqué / ajouté à tort. Seuil fixe non réglable en V1.</div>
+  </li>
+  <li>
+    <a href="test-4-import-formats.html">Test 4 - Import EDF+ et parsing des formats de codage</a>
+    <div class="st">Quels fichiers sont réellement nécessaires (EDF+, Data.ndb) vs superflus, détection par signature + sql.js.</div>
+  </li>
+</ol>
+
+<div class="box">
+  <b>Données de test</b>
+  <br>Codage de référence : <code>scoring.json</code>, extrait de l'étude Noxturnal <code>ZAM PEH PSG intéressante/Data.ndb</code> par <code>../extract-scoring.py</code> (révision « EPNOS v1 », scoring manuel expert).
+  <br>Codage candidat : dérivé à la volée de la référence via <code>lib/scoring.js → makeCandidate()</code>, avec 3-4 erreurs injectées et documentées.
+</div>
+
+</body>
+</html>

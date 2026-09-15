@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test 4 - Import EDF+ et formats de codage</title>
+<style>
+  :root { color-scheme: light; --line: #ddd; }
+  body { font: 13px/1.5 system-ui, sans-serif; margin: 0; padding: 14px 16px 40px; background: #fff; color: #1a1a1a; max-width: 980px; }
+  a { color: #1c6dd0; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  h2 { font-size: 13px; margin: 26px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  a.back { font-size: 12px; }
+  .hint { font-size: 11px; color: #777; }
+  code { background: #f2f2f2; border-radius: 3px; padding: 1px 4px; font-size: 12px; }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 700px) { .cards { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #fafafa; }
+  .card h3 { margin: 0 0 6px; font-size: 13px; }
+  .card .tag { display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 10px; background: #e7f0ff; color: #1c5ec2; margin-bottom: 6px; }
+  .card dl { margin: 6px 0 0; font-size: 12px; }
+  .card dt { font-weight: 600; margin-top: 6px; }
+  .card dd { margin: 2px 0 0; color: #333; }
+
+  #drop { border: 2px dashed #bbb; border-radius: 10px; padding: 24px; text-align: center; color: #666; cursor: pointer; background: #fcfcfc; }
+  #drop.over { border-color: #1c6dd0; background: #eef5ff; color: #1c6dd0; }
+  #fileInput { display: none; }
+
+  .results { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+  .result { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .result .head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fafafa; border-bottom: 1px solid var(--line); }
+  .result .head b { font-size: 12.5px; }
+  .result .head .size { color: #888; font-size: 11px; margin-left: auto; }
+  .badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+  .badge.ok { background: #d3f4dd; color: #157347; }
+  .badge.warn { background: #fff1cc; color: #966400; }
+  .badge.no { background: #f1f1f1; color: #666; }
+  .result .body { padding: 10px 12px; font-size: 12px; }
+  .result .body pre { background: #f6f6f6; border-radius: 6px; padding: 8px; font-size: 11px; overflow-x: auto; margin: 6px 0 0; }
+  .result canvas { display: block; width: 100%; height: 60px; background: #fff; border: 1px solid var(--line); border-radius: 4px; margin-top: 6px; }
+  .err { color: #c1121f; }
+</style>
+</head>
+<body>
+
+<a class="back" href="./">← tests</a>
+<h1>Test 4 - Import EDF+ et parsing des formats de codage</h1>
+<p class="hint">Objectif : déterminer empiriquement quels fichiers sont réellement nécessaires pour importer les tracés et le codage d'un enregistrement, à partir des fichiers présents dans le dossier du projet.</p>
+
+<h2>Fichiers nécessaires</h2>
+<div class="cards">
+  <div class="card">
+    <span class="tag">.edf</span>
+    <h3>Export EDF+ (tracés)</h3>
+    <dl>
+      <dt>Comment l'obtenir</dt>
+      <dd>Export depuis NOX (menu <b>Rapports</b> ou export de l'enregistrement) au format EDF+. EDF+ est la version étendue du format EDF d'origine : mêmes signaux, mais avec des champs patient/enregistrement normalisés et la possibilité d'un canal <code>EDF Annotations</code> pour embarquer des événements dans le fichier. Sur les exports NOX qu'on a testés, ce canal est absent - le codage n'est donc de toute façon jamais dans l'EDF, qu'il soit exporté en EDF ou en EDF+.</dd>
+      <dt>Contenu</dt>
+      <dd>Tous les signaux physiologiques de l'enregistrement : canaux, fréquences d'échantillonnage, dates, calibration physique (min/max digital ↔ physique). Aucune information de scoring.</dd>
+      <dt>Comment c'est lu</dt>
+      <dd>Parseur JS maison (<code>lib/edf-reader.js</code>), aucune librairie. Lecture par tranches via <code>File.slice()</code> (ou requêtes HTTP Range à distance) : le fichier n'est jamais chargé en entier, seuls l'en-tête puis les fenêtres temporelles demandées sont lus.</dd>
+      <dt>Librairies existantes</dt>
+      <dd><a href="https://www.npmjs.com/package/edfdecoder" target="_blank" rel="noopener">edfdecoder</a> et <a href="https://github.com/jusjusjus/edfjs" target="_blank" rel="noopener">edfjs</a> (JS/npm).</dd>
+    </dl>
+  </div>
+  <div class="card">
+    <span class="tag">Data.ndb</span>
+    <h3>Base NOX du dossier d'étude natif</h3>
+    <dl>
+      <dt>Comment l'obtenir</dt>
+      <dd>Présent directement dans les dossiers d'enregistrement fournis par SLC Training - pas d'export à faire, juste retrouver ce fichier dans le dossier d'étude natif transmis.</dd>
+      <dt>Contenu</dt>
+      <dd>Le scoring de référence - tables <code>scoring_revision</code> / <code>scoring_key</code> / <code>scoring_marker</code> (horodatage en ticks .NET, 100ns depuis l'an 1) - et le montage d'affichage NOX (canaux, couleurs, filtres, échelles), sérialisé dans la table <code>workspace_workspace</code>.</dd>
+      <dt>Comment c'est lu</dt>
+      <dd>Base <b>SQLite</b>, lue dans le navigateur avec <a href="https://sql.js.org/" target="_blank" rel="noopener">sql.js</a> pour les tables de scoring. Le montage, lui, est un blob binaire propriétaire (<b>.NET MS-NRBF</b>) : pas encore lisible en JS, seulement via un script Python dédié (<code>extract-montage.py</code>). Ce test le détecte sans le décoder.</dd>
+    </dl>
+  </div>
+</div>
+
+<h2>Vérifier un fichier</h2>
+<p class="hint">Dépose ici n'importe quel fichier du dossier (ou plusieurs à la fois) : le test détecte le format par signature binaire et affiche ce qu'il en tire, avec un échantillon visuel.</p>
+<div id="drop">Glisser des fichiers ici, ou cliquer pour en choisir
+  <input type="file" id="fileInput" multiple>
+</div>
+<div class="results" id="results"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+<script type="module">
+import { parseEdfHeader, readWindow, fmtClock, fmtDur } from "../lib/edf-reader.js";
+import { drawWaves, fitCanvas } from "../lib/trace-render.js";
+
+const $ = id => document.getElementById(id);
+let SQL = null;
+const sqlReady = initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}` })
+  .then(s => { SQL = s; });
+
+const drop = $("drop"), input = $("fileInput");
+drop.addEventListener("click", () => input.click());
+input.addEventListener("change", () => handleFiles(input.files));
+["dragover", "dragleave", "drop"].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.toggle("over", ev === "dragover"); }));
+drop.addEventListener("drop", e => handleFiles(e.dataTransfer.files));
+
+function handleFiles(fileList) {
+  for (const file of fileList) processFile(file);
+}
+
+function addResult(file) {
+  const el = document.createElement("div");
+  el.className = "result";
+  el.innerHTML = `<div class="head"><b>${file.name}</b><span class="badge no">analyse…</span><span class="size">${fmtSize(file.size)}</span></div><div class="body">…</div>`;
+  $("results").prepend(el);
+  return {
+    badge: (cls, text) => { const b = el.querySelector(".badge"); b.className = "badge " + cls; b.textContent = text; },
+    body: html => { el.querySelector(".body").innerHTML = html; },
+    el,
+  };
+}
+
+function fmtSize(n) {
+  if (n > 1e6) return (n / 1e6).toFixed(1) + " Mo";
+  if (n > 1e3) return (n / 1e3).toFixed(1) + " Ko";
+  return n + " o";
+}
+
+async function sniff(file) {
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const ascii = [...head].map(b => String.fromCharCode(b)).join("");
+  if (ascii.startsWith("SQLite format 3")) return "sqlite";
+  if (head[0] === 0x4e && head[1] === 0x4f && head[2] === 0x58) return "ndf"; // "NOX"
+  if (ascii.startsWith("CIDELEC01")) return "cid";
+  // en-tête EDF : le champ "version" (8 octets) est numérique (souvent "0" + espaces)
+  if (/^[\d ]{8}$/.test(ascii.slice(0, 8)) && (file.name.toLowerCase().endsWith(".edf") || head[0] === 0x30)) return "edf";
+  return "unknown";
+}
+
+async function processFile(file) {
+  const r = addResult(file);
+  try {
+    const kind = await sniff(file);
+    if (kind === "edf") return await handleEdf(file, r);
+    if (kind === "sqlite") return await handleSqlite(file, r);
+    if (kind === "ndf") {
+      r.badge("no", "non nécessaire");
+      r.body(`Signature <code>NOX</code> reconnue : fichier de canal individuel (format propriétaire). Contenu redondant avec l'EDF exporté - pas besoin de le lire.`);
+      return;
+    }
+    if (kind === "cid") {
+      r.badge("no", "non nécessaire");
+      r.body(`Signature <code>CIDELEC01</code> reconnue : format d'un autre logiciel (CIDELEC), hors sujet pour un enregistrement NOX.`);
+      return;
+    }
+    await handleUnknown(file, r);
+  } catch (err) {
+    console.error(err);
+    r.badge("no", "erreur");
+    r.body(`<span class="err">Échec de lecture : ${err.message || err}</span>`);
+  }
+}
+
+async function handleEdf(file, r) {
+  const edf = await parseEdfHeader(file);
+  const preferred = ["Flow", "ECG", "Thorax rapide", "Nasal Pressure"];
+  const sig = preferred.map(l => edf.signals.find(s => s.label === l)).find(Boolean)
+    || edf.signals.find(s => s.nsamp > 0);
+  r.badge("ok", "nécessaire - tracés");
+  // Le canvas est construit une seule fois via innerHTML, puis dessiné directement dessus :
+  // une seconde écriture de .innerHTML recréerait un <canvas> vierge et effacerait le tracé
+  // (le contenu bitmap n'est jamais sérialisé dans le HTML).
+  r.body(`
+    <div><b>${edf.ns}</b> signaux · durée ${fmtDur(edf.totalDuration)} · début ${edf.header.startDate} ${fmtClock(edf.startSecOfDay)}
+    · taille attendue ${edf.header.sizeMatches ? "cohérente ✓" : "<span class=err>incohérente</span>"}</div>
+    <div class="hint">Lu via <code>parseEdfHeader()</code> (lib/edf-reader.js) - en-tête seul (${edf.headerBytes} o), rien d'autre chargé pour l'instant.</div>
+    ${sig ? `<canvas id="cv-${cssId(file)}"></canvas><div class="hint">Échantillon : canal « ${sig.label} », 30 premières secondes.</div>` : ""}
+  `);
+  if (sig) {
+    const win = await readWindow(edf, [sig.index], 0, Math.min(30, edf.totalDuration));
+    const cv = r.el.querySelector("canvas");
+    fitCanvas(cv);
+    drawWaves(cv, [win.byId[sig.index]], { colors: ["#1c6dd0"] });
+  }
+}
+
+// Lit les tables sans supposer d'ID figés (révision, clé...) : ceux-ci sont
+// propres à chaque fichier NOX, jamais les mêmes d'un enregistrement à l'autre.
+function rowsOf(db, sql) {
+  try { return db.exec(sql)[0]?.values || []; } catch { return []; }
+}
+function tableCols(db, table) {
+  return rowsOf(db, `PRAGMA table_info(${table})`).map(c => c[1]);
+}
+
+async function handleSqlite(file, r) {
+  await sqlReady;
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const db = new SQL.Database(buf);
+  const tables = rowsOf(db, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").map(v => v[0]);
+
+  let html = `<div><b>Base SQLite</b> · tables : ${tables.map(t => `<code>${t}</code>`).join(" ")}</div>`;
+  const hasScoringSchema = ["scoring_marker", "scoring_key", "scoring_revision"].every(t => tables.includes(t));
+
+  if (hasScoringSchema) {
+    const hasIsDeleted = tableCols(db, "scoring_marker").includes("is_deleted");
+    const delFilterM = hasIsDeleted ? "AND m.is_deleted=0" : "";
+    const delFilter = hasIsDeleted ? "AND is_deleted=0" : "";
+    // Une clé "Manual" avec au moins un marqueur = une vraie correction humaine.
+    // C'est le signal le plus fiable qu'un fichier contient un codage de référence
+    // exploitable, quels que soient les ID de clé/révision de CE fichier précis.
+    const keyRows = rowsOf(db, `
+      SELECT k.id, k.type, COUNT(m.id) n
+      FROM scoring_key k LEFT JOIN scoring_marker m ON m.key_id = k.id ${delFilterM}
+      GROUP BY k.id`);
+    const manualKeys = keyRows.filter(([, type, n]) => type === "Manual" && n > 0);
+    const revisions = rowsOf(db, "SELECT id, name, version FROM scoring_revision");
+    const revToKey = rowsOf(db, "SELECT revision_id, key_id FROM scoring_revision_to_key");
+    const manualKeyIds = new Set(manualKeys.map(([id]) => id));
+    const revisionsWithManual = revisions.filter(([id]) =>
+      revToKey.some(([rid, kid]) => rid === id && manualKeyIds.has(kid)));
+    const hasMontage = tables.includes("workspace_workspace");
+
+    if (manualKeys.length) {
+      const idList = manualKeys.map(([id]) => id).join(",");
+      const byType = rowsOf(db, `
+        SELECT type, COUNT(*) c FROM scoring_marker
+        WHERE key_id IN (${idList}) ${delFilter}
+        GROUP BY type ORDER BY c DESC LIMIT 12`);
+      r.badge("ok", "nécessaire - codage de référence");
+      html += `<div>${manualKeys.length} clé(s) manuelle(s) avec du scoring (sur ${keyRows.length} clés au total),
+        dans la révision ${revisionsWithManual.map(([, n, v]) => `« ${n} » v${v}`).join(", ") || "?"} :</div>
+        <pre>${byType.map(([t, c]) => `${String(c).padStart(4)}  ${t}`).join("\n")}</pre>
+        <div class="hint">Détecté dynamiquement (clé de type <code>Manual</code> avec marqueurs), sans supposer d'ID fixes.${
+          hasMontage ? " Contient aussi <code>workspace_workspace</code> (montage d'affichage) : blob MS-NRBF non décodé ici, voir <code>extract-montage.py</code>." : ""
+        }</div>`;
+    } else {
+      const byType = rowsOf(db, `SELECT type, COUNT(*) c FROM scoring_marker GROUP BY type ORDER BY c DESC LIMIT 8`);
+      r.badge("warn", "reconnu, pas de scoring manuel");
+      html += `<div>${keyRows.length} clé(s), toutes automatiques ou vides - aucune correction humaine :</div>
+        <pre>${byType.map(([t, c]) => `${String(c).padStart(4)}  ${t}`).join("\n")}</pre>`;
+    }
+  } else if (tables.includes("scoring_marker")) {
+    // Schéma partiel (ex. DeviceEvents.nef) : pas de table de révision, on ne peut
+    // que regarder les types de marqueurs.
+    const byType = rowsOf(db, "SELECT type, COUNT(*) c FROM scoring_marker GROUP BY type ORDER BY c DESC LIMIT 12");
+    const medicalRows = byType.filter(([type]) => !type.startsWith("device-"));
+    r.badge(medicalRows.length ? "ok" : "warn", medicalRows.length ? "nécessaire - codage" : "reconnu, pas de scoring médical");
+    html += `<div>Schéma de scoring incomplet (pas de <code>scoring_revision</code>). Types de marqueurs trouvés :</div>
+      <pre>${byType.map(([t, c]) => `${String(c).padStart(4)}  ${t}`).join("\n")}</pre>`;
+  } else if (tables.includes("general_property")) {
+    r.badge("warn", "reconnu, pas du scoring");
+    html += `<div>Catalogue de types/propriétés d'événements NOX (table <code>general_property</code>) - sert à interpréter des codes de scoring custom, ne contient aucun scoring en soi.</div>`;
+  } else if (tables.includes("recording_ws4perspective")) {
+    r.badge("warn", "reconnu, pas du scoring");
+    html += `<div>Profil d'affichage alternatif (table <code>recording_ws4perspective</code>) - pas de scoring, redondant avec le montage de Data.ndb.</div>`;
+  } else {
+    r.badge("no", "reconnu, structure inconnue");
+  }
+  r.body(html);
+}
+
+async function handleUnknown(file, r) {
+  const sample = await file.slice(0, 400).text().catch(() => null);
+  const printable = sample && /^[\x09\x0a\x0d\x20-\x7eÀ-ſ]*$/.test(sample);
+  r.badge("no", "non nécessaire / non reconnu");
+  if (printable && sample.trim()) {
+    r.body(`<div>Fichier texte (config/journal), pas de tracé ni de scoring :</div><pre>${escapeHtml(sample.slice(0, 300))}</pre>`);
+  } else {
+    r.body(`<div>Contenu binaire opaque non identifié (ni EDF, ni SQLite, ni NOX/.ndf, ni CIDELEC) - probablement chiffré ou propriétaire non pertinent ici.</div>`);
+  }
+}
+
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function cssId(file) { return file.name.replace(/[^a-z0-9]/gi, "_") + "_" + file.size; }
+</script>
+
+</body>
+</html>

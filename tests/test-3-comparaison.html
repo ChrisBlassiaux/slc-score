@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test 3 - Correction simplifiée par comparaison</title>
+<style>
+  :root { color-scheme: light; --line: #ddd; --ok: #2b9348; --miss: #e8590c; --add: #c1121f; }
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 14px; background: #fff; color: #1a1a1a; }
+  a { color: #1c6dd0; }
+  a.back { font-size: 12px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  h2 { font-size: 12px; margin: 14px 0 4px; color: #555; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 8px 0; }
+  .bar label { white-space: nowrap; }
+  input { background: #fff; color: #1a1a1a; border: 1px solid #ccc; border-radius: 4px; }
+  input[type=number] { width: 64px; }
+  input[type=text].time { width: 84px; }
+  button { cursor: pointer; padding: 4px 12px; border-radius: 6px; border: 1px solid #ccc; background: #f4f4f4; color: #1a1a1a; }
+  button:hover { background: #ececec; }
+  .hint { font-size: 11px; color: #777; }
+  .err { color: #c1121f; white-space: pre-wrap; }
+
+  .statsRow { display: flex; gap: 16px; align-items: stretch; flex-wrap: wrap; margin: 10px 0; }
+  .statsLeft { flex: 1 1 380px; min-width: 0; }
+  #summary { display: flex; gap: 16px; flex-wrap: wrap; }
+  .infoBox { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: #fafafa; font-size: 11.5px; color: #444; width: 340px; flex: 0 0 340px; }
+  .infoBox b { color: #1a1a1a; }
+  .infoBox p { margin: 5px 0; }
+  .infoBox .formula { font-family: ui-monospace, monospace; background: #f0f0f0; padding: 3px 6px; border-radius: 4px; }
+  .infoBox ul { margin: 5px 0 0; padding-left: 16px; }
+  .infoBox li { margin: 2px 0; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; font-size: 12px; cursor: pointer; user-select: none; }
+  .stat:hover { background: #f7f7f7; }
+  .stat.active { border-width: 2px; padding: 5px 13px; background: #f2f6ff; }
+  .stat b { display: block; font-size: 18px; }
+  .stat.ok b { color: var(--ok); }
+  .stat.miss b { color: var(--miss); }
+  .stat.add b { color: var(--add); }
+  .stat.tol b { color: #6f3198; }
+
+  .list { font-size: 11px; color: #555; margin: 4px 0 0 0; padding-left: 18px; }
+  .list li { margin: 1px 0; }
+  .list .miss { color: var(--miss); }
+  .list .add { color: var(--add); }
+  .list .tol { color: #6f3198; }
+  .list .stagediff { color: #966400; }
+  .list a.jump { color: inherit; text-decoration: underline dotted; cursor: pointer; }
+  .list a.jump:hover { color: #1c6dd0; }
+
+  #legend { font-size: 11px; color: #444; margin: 8px 0; display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; }
+  #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+  #scrollx { overflow-x: auto; overflow-y: hidden; }
+  .stack { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #fff; width: max-content; }
+  .stack + .stack { margin-top: 6px; }
+  .row { display: grid; grid-template-columns: 150px var(--trace-w, 1380px); border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: none; }
+  .row .lbl { padding: 3px 8px; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; font-size: 11px; position: sticky; left: 0; background: #fff; }
+  .row .lbl b { font-weight: 600; }
+  .row canvas { display: block; width: var(--trace-w, 1380px); height: 80px; background: #fff; }
+  /* L'hypnogramme montre toute la nuit en permanence (vision globale), pas la
+     fenêtre affichée : largeur propre, indépendante de --trace-w, jamais dans
+     la zone de défilement horizontal des tracés. */
+  #hypno { width: max-content; max-width: 100%; margin-bottom: 8px; }
+  #hypno .row { grid-template-columns: 150px minmax(300px, 900px); }
+  #hypno .row canvas { width: 100%; height: 66px; }
+  #hypno .row .lbl { position: static; }
+  .traceWrap { display: flex; flex-direction: column; }
+  .traceWrap canvas.marker { height: 14px; border-bottom: 1px dashed var(--line); }
+  .traceWrap canvas.main { height: 80px; }
+  .row.axis { background: #fafafa; }
+  .row.axis .ticks { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 11px; color: #777; }
+</style>
+</head>
+<body>
+
+<a class="back" href="./">← tests</a>
+<h1>Test 3 - Correction simplifiée par comparaison référence/candidat</h1>
+<p class="hint">Même échantillon que le Test 2 (Flux nasal, Thorax, Abdomen, + hypnogramme). Appariement automatique par recouvrement (IoU), seuil fixe non réglable en V1 - la tolérance fine reste appréciée à l'œil par le correcteur.</p>
+
+<div class="bar" id="nav" hidden>
+  <button id="prev">◀ Fenêtre précédente</button>
+  <button id="next">Fenêtre suivante ▶</button>
+  <label>Aller à <input type="text" class="time" id="goto" placeholder="hh:mm:ss"></label>
+  <label>Fenêtre (min) <input type="number" id="win" value="5" min="1" max="15" step="0.5"></label>
+  <span id="clock" class="hint"></span>
+</div>
+<p id="status" class="hint">chargement…</p>
+<p id="error" class="err"></p>
+
+<div class="statsRow">
+  <div class="statsLeft">
+    <div id="summary" hidden></div>
+    <p class="hint" id="detailHint" hidden>Clique sur une statistique pour afficher (ou masquer) les événements correspondants.</p>
+    <ul class="list" id="detailList"></ul>
+    <div id="legend" hidden>
+      <span><span class="sw" style="background:var(--ok)"></span>Apparié (bande = position référence)</span>
+      <span><span class="sw" style="background:#6f3198"></span>Repère fin en haut = position réelle du candidat, si différente</span>
+      <span><span class="sw" style="background:var(--miss)"></span>Manqué (référence non codée)</span>
+      <span><span class="sw" style="background:var(--add)"></span>Ajouté à tort</span>
+    </div>
+  </div>
+  <div class="infoBox" hidden id="infoBox">
+    <b>Comment ça marche : l'IoU</b>
+    <p>Pour apparier un événement candidat à un événement de référence, on calcule leur
+    recouvrement temporel avec l'<b>IoU</b> (<i>Intersection over Union</i>) :</p>
+    <p class="formula">IoU = (durée en commun) / (durée totale couverte par les deux)</p>
+    <p>Exemple : référence 3:14-3:30 (16s), candidat 3:26-3:30 (4s) → partie commune 4s,
+    étendue totale 3:14-3:30 = 16s → IoU = 4/16 = <b>25%</b>.</p>
+    <p>Seuil fixe (non réglable en V1) : <code>IoU &gt; 30%</code>.</p>
+    <ul>
+      <li><b>Apparié</b> : IoU = 100% (positions identiques)</li>
+      <li><b>Apparié toléré</b> : 30% &lt; IoU &lt; 100% (décalage accepté)</li>
+      <li><b>Manqué / ajouté à tort</b> : IoU ≤ 30%, ou aucun candidat/référence en face</li>
+    </ul>
+  </div>
+</div>
+
+<div class="stack" id="hypno" hidden></div>
+<div id="scrollx">
+  <div class="stack" id="stack"></div>
+</div>
+
+<script type="module">
+import { openRemoteEdf, readWindow, highpass, lowpass, fmtClock, fmtDur } from "../lib/edf-reader.js";
+import { buildMontage, GROUP_TO_PANEL } from "../lib/nox-layout.js";
+import { drawWaves, drawHypnogram, drawEventOverlay, clearCanvas, fitCanvas } from "../lib/trace-render.js";
+import { loadScoring, makeCandidate, compareEvents, compareHypnogram, fmt } from "../lib/scoring.js";
+
+const $ = id => document.getElementById(id);
+const EDF_URL = "../enregistement-nox-complet.edf";
+const SCORING_URL = "../scoring.json";
+const MONTAGE_URL = "../montage.json";
+const SAMPLE_LABELS = ["Flux nasal (Lunette)", "Thorax", "Abdomen"];
+const PX_MIN = 276;
+const PREROLL = 60;
+
+let edf = null, panels = [], reference = null, candidate = null;
+let resp = null, arousal = null, hypDiff = null, verdictEvents = [], candMarkerEvents = [];
+let t0 = 0, prefetch = null;
+
+function applyLayout() {
+  const w = winSec();
+  document.documentElement.style.setProperty("--trace-w", Math.round((w / 60) * PX_MIN) + "px");
+}
+
+boot();
+
+async function boot() {
+  try {
+    $("status").textContent = "lecture de l'en-tête…";
+    edf = await openRemoteEdf(EDF_URL);
+    const montage = await (await fetch(MONTAGE_URL)).json();
+    const mont = buildMontage(edf, montage, "Respi PSG");
+    panels = SAMPLE_LABELS.map(l => mont.panels.find(p => p.label === l)).filter(Boolean);
+
+    reference = await loadScoring(SCORING_URL);
+    candidate = makeCandidate(reference);
+
+    resp = compareEvents(reference.events.filter(e => e.group === "resp"), candidate.events.filter(e => e.group === "resp"));
+    arousal = compareEvents(reference.events.filter(e => e.group === "arousal"), candidate.events.filter(e => e.group === "arousal"));
+    hypDiff = compareHypnogram(reference.hypnogram, candidate.hypnogram);
+    buildVerdictEvents();
+
+    applyLayout();
+    buildStack();
+    buildSummary();
+    $("status").textContent =
+      `${fmtDur(edf.totalDuration)} · début ${fmtClock(edf.startSecOfDay)} · seuil IoU fixe = ${resp.threshold}`;
+    $("nav").hidden = false;
+    $("legend").hidden = false;
+    $("summary").hidden = false;
+    $("infoBox").hidden = false;
+    render();
+  } catch (err) {
+    console.error(err);
+    $("error").textContent = "Échec : " + (err.message || err) +
+      "\n(la page doit être servie : python3 serve.py, puis http://localhost:8000/tests/)";
+  }
+}
+
+// Traduit les résultats d'appariement resp+arousal en une liste d'événements
+// unique, coloriée par verdict plutôt que par source (référence/candidat) :
+// c'est tout l'intérêt de ce test par rapport au Test 2.
+// verdictEvents : la bande pleine hauteur habituelle (position référence pour un
+// apparié). candMarkerEvents : un repère fin, séparé, pour la position réelle du
+// candidat quand elle diffère - pas de remplissage superposé sur le tracé.
+function buildVerdictEvents() {
+  verdictEvents = [];
+  candMarkerEvents = [];
+  for (const cmp of [resp, arousal]) {
+    for (const m of cmp.matched) {
+      verdictEvents.push({ t0: m.ref.t0, t1: m.ref.t1, type: "apparié", group: m.ref.group, verdict: "ok" });
+      const exact = m.ref.t0 === m.cand.t0 && m.ref.t1 === m.cand.t1;
+      if (!exact) {
+        candMarkerEvents.push({ t0: m.cand.t0, t1: m.cand.t1, type: "candidat", group: m.cand.group, verdict: "okCand" });
+      }
+    }
+    for (const e of cmp.missed) verdictEvents.push({ t0: e.t0, t1: e.t1, type: "manqué", group: e.group, verdict: "miss" });
+    for (const e of cmp.falsePositive) verdictEvents.push({ t0: e.t0, t1: e.t1, type: "ajouté à tort", group: e.group, verdict: "add" });
+  }
+}
+
+const VERDICT_STYLE = {
+  ok:     { fill: "rgba(43,147,72,.30)",   line: "#2b9348" },
+  okCand: { fill: "rgba(111,49,152,.30)",  line: "#6f3198" },
+  miss:   { fill: "rgba(232,89,12,.30)",   line: "#e8590c" },
+  add:    { fill: "rgba(193,18,18,.30)",   line: "#c1121f" },
+};
+const styleFor = ev => VERDICT_STYLE[ev.verdict];
+
+// Associe un événement à l'erreur connue de makeCandidate() dont il provient,
+// si elle existe (annotation "pourquoi" dans la liste, ex. "decalage-tolere").
+function findInjected(t0) {
+  return candidate.injectedErrors.find(e =>
+    Math.abs(e.t0 - t0) < 0.01 || (e.oldT0 != null && Math.abs(e.oldT0 - t0) < 0.01));
+}
+
+// Une seule construction pour les 5 catégories cliquables, réutilisée par les
+// statistiques ET par la liste de détail : plus de section séparée qui refait
+// le même calcul avec un filtrage différent.
+function buildCategories() {
+  const isExact = m => m.ref.t0 === m.cand.t0 && m.ref.t1 === m.cand.t1;
+  const cats = { ok: [], tol: [], miss: [], add: [], stagediff: [] };
+  for (const [label, cmp] of [["resp", resp], ["arousal", arousal]]) {
+    for (const m of cmp.matched) {
+      const key = isExact(m) ? "ok" : "tol";
+      cats[key].push({ t0: m.ref.t0, t1: m.ref.t1, type: m.ref.type, label, iou: m.iou, inj: findInjected(m.cand.t0) });
+    }
+    for (const e of cmp.missed) cats.miss.push({ t0: e.t0, t1: e.t1, type: e.type, label, inj: findInjected(e.t0) });
+    for (const e of cmp.falsePositive) cats.add.push({ t0: e.t0, t1: e.t1, type: e.type, label, inj: findInjected(e.t0) });
+  }
+  for (const e of hypDiff.filter(x => !x.match)) {
+    cats.stagediff.push({ t0: e.t0, t1: e.t1, type: `${e.refStage} → ${e.candStage ?? "absent"}`, label: "hypnogramme", inj: findInjected(e.t0) });
+  }
+  return cats;
+}
+
+const STAT_DEFS = [
+  ["ok", "ok", "apparié"],
+  ["tol", "tol", "apparié toléré"],
+  ["miss", "miss", "manqué"],
+  ["add", "add", "ajouté à tort"],
+  ["stagediff", "", "époque de stade différente"],
+];
+let categories = null;
+const activeCats = new Set();
+
+function buildSummary() {
+  categories = buildCategories();
+  const s = n => n > 1 ? "s" : "";
+  $("summary").innerHTML = STAT_DEFS.map(([key, cls, label]) => {
+    const n = categories[key].length;
+    const suffix = key === "stagediff" ? ` / ${hypDiff.length}` : "";
+    return `<div class="stat ${cls}${activeCats.has(key) ? " active" : ""}" data-key="${key}">` +
+      `<b>${n}</b>${label}${s(n)}${suffix}</div>`;
+  }).join("");
+  renderDetailList();
+}
+
+function renderDetailList() {
+  $("detailHint").hidden = false;
+  if (!activeCats.size) { $("detailList").innerHTML = ""; return; }
+  const rows = [];
+  for (const key of activeCats) {
+    for (const ev of categories[key]) {
+      const jump = `<a href="#" class="jump" data-t0="${ev.t0}" data-t1="${ev.t1}">${fmt(ev.t0)}${ev.t1 !== ev.t0 ? "–" + fmt(ev.t1) : ""}</a>`;
+      const iouTxt = ev.iou != null ? ` · IoU ${(ev.iou * 100).toFixed(0)}%` : "";
+      const injTxt = ev.inj ? ` <i>(${ev.inj.kind})</i>` : "";
+      rows.push(`<li class="${key}">[${ev.label}] ${ev.type} ${jump}${iouTxt}${injTxt}</li>`);
+    }
+  }
+  $("detailList").innerHTML = rows.join("") || "<li>Aucun événement dans cette sélection.</li>";
+}
+
+$("summary").addEventListener("click", e => {
+  const div = e.target.closest(".stat[data-key]");
+  if (!div) return;
+  const key = div.dataset.key;
+  if (activeCats.has(key)) activeCats.delete(key); else activeCats.add(key);
+  buildSummary();
+});
+$("detailList").addEventListener("click", e => {
+  const a = e.target.closest("a.jump");
+  if (!a) return;
+  e.preventDefault();
+  const t0v = parseFloat(a.dataset.t0), t1v = parseFloat(a.dataset.t1);
+  const mid = (t0v + (Number.isFinite(t1v) ? t1v : t0v)) / 2;
+  goTo(Math.max(0, mid - winSec() / 2));
+});
+
+function buildStack() {
+  const stack = $("stack");
+  stack.innerHTML = "";
+  for (const p of panels) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<div class="lbl"><b>${p.label}</b><span>${p.sig ? p.sig.label : "canal absent"}</span></div>` +
+      `<div class="traceWrap"><canvas class="marker"></canvas><canvas class="main"></canvas></div>`;
+    stack.append(row);
+    p.markerCv = row.querySelector("canvas.marker");
+    p.canvas = row.querySelector("canvas.main");
+  }
+  const axis = document.createElement("div");
+  axis.className = "row axis";
+  axis.innerHTML = `<div class="lbl"></div><div class="ticks" id="ticks"></div>`;
+  stack.append(axis);
+
+  $("hypno").hidden = false;
+  $("hypno").innerHTML =
+    `<div class="row"><div class="lbl"><b>Hypnogramme</b><span>candidat, écarts en rouge</span></div>` +
+    `<canvas id="hypnoCv"></canvas></div>`;
+}
+
+function winSec() { return Math.max(60, (parseFloat($("win").value) || 5) * 60); }
+function goTo(sec) {
+  t0 = Math.max(0, Math.min(edf.totalDuration - winSec(), sec));
+  render();
+}
+$("prev").addEventListener("click", () => goTo(t0 - winSec()));
+$("next").addEventListener("click", () => goTo(t0 + winSec()));
+$("win").addEventListener("change", () => { applyLayout(); goTo(t0); });
+$("goto").addEventListener("change", () => {
+  const v = $("goto").value.trim();
+  let s = null;
+  if (/^\d+$/.test(v)) s = +v;
+  else {
+    const m = v.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (m) {
+      const clk = (+m[1]) * 3600 + (+m[2]) * 60 + (+(m[3] || 0));
+      s = ((clk - edf.startSecOfDay) % 86400 + 86400) % 86400;
+    }
+  }
+  if (s != null) goTo(s);
+});
+
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+
+function readAt(start, dur) {
+  const idxs = [...new Set(panels.filter(p => p.sig).map(p => p.sig.index))];
+  return readWindow(edf, idxs, start, dur, { prerollSec: PREROLL });
+}
+
+function condition(p, series, fs) {
+  let s = series;
+  if (p.inverted) s = s.map(v => -v);
+  if (p.hp && p.hp < fs / 2) s = highpass(s, fs, p.hp);
+  if (p.lp && p.lp < fs / 2) s = lowpass(s, fs, p.lp);
+  return s;
+}
+
+async function render() {
+  if (!edf) return;
+  const dur = Math.min(winSec(), edf.totalDuration - t0);
+  const key = `${t0}|${dur}`;
+
+  let win;
+  if (prefetch && prefetch.key === key) win = await prefetch.promise;
+  else win = await readAt(t0, dur);
+  const { byId, prerollById } = win;
+
+  panels.forEach(p => { fitCanvas(p.canvas); fitCanvas(p.markerCv); });
+
+  for (const p of panels) {
+    if (!p.sig) { clearCanvas(p.canvas); clearCanvas(p.markerCv); continue; }
+    const pre = prerollById[p.sig.index] || 0;
+    let s = condition(p, byId[p.sig.index], p.sig.fs);
+    if (pre) s = s.subarray ? s.subarray(pre) : s.slice(pre);
+    drawWaves(p.canvas, [s], { colors: [p.color], range: p.range });
+    // Même restriction qu'en Test 1 : resp ne se superpose qu'à son panneau de
+    // référence NOX (Flux nasal), pas à tous les canaux de l'échantillon.
+    const groups = Object.keys(GROUP_TO_PANEL).filter(g => GROUP_TO_PANEL[g].includes(p.label));
+    const mctx = p.markerCv.getContext("2d");
+    mctx.clearRect(0, 0, p.markerCv.width, p.markerCv.height);
+    if (groups.length) {
+      drawEventOverlay(p.canvas, verdictEvents, t0, dur, { groups, styleFor, label: true });
+      // Repère candidat dans sa propre petite zone au-dessus, pas superposé au tracé.
+      drawEventOverlay(p.markerCv, candMarkerEvents, t0, dur, { groups, styleFor, label: true });
+    }
+  }
+
+  // fitCanvas ici, pas plus haut : tant que #hypno porte encore `hidden` (avant
+  // le premier buildStack), clientWidth/Height valent 0 et le canvas se cale
+  // sur 1x1px.
+  fitCanvas($("hypnoCv"));
+  // Vision globale : toute la nuit à chaque rendu, pas seulement la fenêtre
+  // affichée par les tracés (ceux-ci restent sur t0/dur juste en dessous).
+  drawHypnogram($("hypnoCv"), candidate.hypnogram, 0, edf.totalDuration, {});
+  const stageMismatch = hypDiff.filter(e => !e.match).map(e =>
+    ({ t0: e.t0, t1: e.t1, type: `${e.refStage} → ${e.candStage ?? "?"}`, group: "stagediff" }));
+  drawEventOverlay($("hypnoCv"), stageMismatch, 0, edf.totalDuration,
+    { groups: ["stagediff"], band: "bottom", styleFor: () => VERDICT_STYLE.add, label: true });
+  // Repère de position : où se trouve la fenêtre actuellement affichée dans la nuit.
+  drawEventOverlay($("hypnoCv"), [{ t0, t1: t0 + dur, type: "fenêtre affichée", group: "currentwin" }],
+    0, edf.totalDuration,
+    { groups: ["currentwin"], outline: true, label: false, styleFor: () => ({ fill: "transparent", line: "#1c6dd0" }) });
+
+  const ticks = $("ticks");
+  ticks.innerHTML = "";
+  for (let k = 0; k <= 5; k++) {
+    const sp = document.createElement("span");
+    sp.textContent = fmtClock(edf.startSecOfDay + t0 + (k / 5) * dur);
+    ticks.append(sp);
+  }
+  const h = Math.floor(t0 / 3600), m = Math.floor((t0 % 3600) / 60);
+  $("clock").textContent =
+    `${fmtClock(edf.startSecOfDay + t0)} → ${fmtClock(edf.startSecOfDay + t0 + dur)}  (${h}h${String(m).padStart(2, "0")})`;
+
+  const nextT0 = Math.min(edf.totalDuration - dur, t0 + dur);
+  if (nextT0 > t0) prefetch = { key: `${nextT0}|${dur}`, promise: readAt(nextT0, dur) };
+}
+</script>
+
+</body>
+</html>

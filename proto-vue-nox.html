@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proto EDF+ - vue multi-canaux type NOX</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; }
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 16px; margin: 0 0 10px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px; }
+  .bar label { white-space: nowrap; }
+  input[type=number] { width: 70px; }
+  button { cursor: pointer; padding: 5px 12px; border-radius: 6px; border: 1px solid #8886; background: #8882; }
+  button:disabled { opacity: .4; cursor: default; }
+  .err { color: #c33; white-space: pre-wrap; }
+  .tabs { display: flex; gap: 4px; margin: 12px 0 8px; border-bottom: 1px solid var(--line); }
+  .tabs button { border-radius: 6px 6px 0 0; border-bottom: none; }
+  .tabs button[aria-selected=true] { background: #3a86ff33; font-weight: 600; }
+  .hidden { display: none; }
+
+  .stack { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .row { display: grid; grid-template-columns: 150px 1fr; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: none; }
+  .row .lbl { padding: 4px 8px; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; font-size: 11px; }
+  .row .lbl b { font-weight: 600; }
+  .row .lbl span { opacity: .6; }
+  .row .lbl .t0 { color: #3a86ff; opacity: .9; }
+  .row .lbl .t1 { color: #e8590c; opacity: .9; }
+  .row .lbl.missing b { color: #c60; }
+  .row canvas { display: block; width: 100%; height: 78px; }
+  .row.axis { grid-template-columns: 150px 1fr; background: #8881; }
+  .row.axis .ticks { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 11px; opacity: .7; }
+
+  #hypnoStack { margin-bottom: 8px; }
+  #hypnoStack .row canvas { height: 70px; }
+  #hypnoLegend { font-size: 10px; line-height: 1.5; }
+  #neuroView { padding: 40px; text-align: center; opacity: .6; border: 1px dashed var(--line); border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<h1>Prototype EDF+ - vue multi-canaux (ordre config NOX)</h1>
+
+<div class="bar">
+  <input type="file" id="file" accept=".edf,.bdf">
+  <span id="hdr"></span>
+</div>
+
+<div class="bar" id="nav" hidden>
+  <button id="prev">◀</button>
+  <label>Début (s) <input type="number" id="t0" value="0" min="0" step="30"></label>
+  <button id="next">▶</button>
+  <label>Fenêtre (min) <input type="number" id="win" value="5" min="0.5" max="15" step="0.5"></label>
+  <label><input type="checkbox" id="hp"> Passe-haut</label>
+  <label>Coupure (Hz) <input type="number" id="fc" value="0.03" min="0.001" step="0.01"></label>
+  <button id="go">Afficher</button>
+  <span id="clock"></span>
+</div>
+
+<div class="bar" id="scoreBar" hidden>
+  <label><input type="checkbox" id="showScore"> Afficher le codage</label>
+  <span id="scoreState"></span>
+  <label style="opacity:.7">Charger un codage : <input type="file" id="scoreFile" accept=".json"></label>
+</div>
+
+<p id="error" class="err"></p>
+
+<div class="tabs" id="tabs" hidden>
+  <button id="tabRespi" aria-selected="true">Respi PSG</button>
+  <button id="tabNeuro" aria-selected="false">Neuro</button>
+</div>
+
+<div id="respiView" class="hidden">
+  <div class="stack" id="hypnoStack" hidden>
+    <div class="row"><div class="lbl"><b>Hypnogramme</b><span id="hypnoLegend"></span></div><canvas id="hypnoCv" width="2000" height="70"></canvas></div>
+  </div>
+  <div class="stack" id="stack"></div>
+</div>
+
+<div id="neuroView" class="hidden">
+  Onglet Neuro : à définir (EEG, EOG, EMG menton, montage, filtres AASM).
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const ascii = (b, o, l) => new TextDecoder("latin1").decode(new Uint8Array(b, o, l)).trim();
+
+// --- ordre et correspondances des canaux, calqués sur la config NOX "Respi PSG" ---
+const RESPI_LAYOUT = [
+  { name: "Activité",             unit: "g/s",   match: ["Activity"] },
+  { name: "Position",             unit: "°",     match: ["PosAngle", "Elevation"] },
+  { name: "Volume (Ronflement)",  unit: "dB",    match: ["Audio Volume dB"] },
+  { name: "Ronflements",          unit: "cmH2O", match: ["Snore"] },
+  { name: "Flux nasal (Lunette)", unit: "cmH2O", match: ["Nasal Pressure", "Flow"] },
+  { name: "cRIP Flow",            unit: "V/s",   match: ["cRIP Flow", "RIP Flow"] },
+  { name: "Resp Rate",            unit: "rpm",   match: ["Resp Rate"] },
+  { name: "SpO2",                 unit: "%",     match: ["Saturation", "SpO2 B-B"] },
+  // NOX superpose ici la sangle brute + une RIP calibrée qu'il calcule ; cette 2e courbe
+  // n'est pas dans l'EDF (Chest ≡ Thorax rapide, corrélation 0,999). Une seule courbe pour l'instant.
+  { name: "Thorax",               unit: "V",     match: ["Thorax rapide", "Chest"] },
+  { name: "Abdomen",              unit: "V",     match: ["Abdomen rapide", "Abdomen"] },
+  { name: "Pouls",                unit: "bpm",   match: ["Pulse", "Heart Rate"] },
+  { name: "Pléth",                unit: "",      match: ["Pulse Waveform"] },
+  { name: "Jambe gauche",         unit: "V",     match: ["Left Leg"] },
+  { name: "Jambe droite",         unit: "V",     match: ["Right Leg"] },
+];
+
+let edf = null;
+let panels = [];  // { def, sig|null, canvas }
+let scoring = null;  // { meta, hypnogram[], events[] }
+
+// quel groupe d'événements se superpose à quel panneau
+const GROUP_TO_PANEL = {
+  resp: ["Flux nasal (Lunette)"],
+  desat: ["SpO2"],
+  snore: ["Ronflements"],
+  position: ["Position"],
+  activity: ["Activité"],
+  limb: ["Jambe gauche", "Jambe droite"],
+};
+const EVENT_STYLE = {
+  hypopnea:            { fill: "rgba(77,171,247,.30)", line: "#4dabf7" },
+  "apnea-obstructive": { fill: "rgba(250,82,82,.32)",  line: "#fa5252" },
+  "apnea-central":     { fill: "rgba(230,73,128,.32)", line: "#e64980" },
+  "apnea-mixed":       { fill: "rgba(190,75,220,.32)", line: "#be4bdc" },
+  rera:                { fill: "rgba(255,212,59,.28)", line: "#f0b400" },
+  "oxygensaturation-drop": { fill: "rgba(64,192,87,.16)", line: "#40c057" },
+  "snore-train":       { fill: "rgba(151,117,250,.26)", line: "#9775fa" },
+  arousal:             { fill: "rgba(255,120,60,.30)", line: "#ff783c" },
+  "activity-movement": { fill: "rgba(150,150,150,.30)", line: "#aaa" },
+  plm:                 { fill: "rgba(130,201,30,.32)", line: "#82c91e" },
+  "limbmovement-periodictwitch": { fill: "rgba(130,201,30,.22)", line: "#82c91e" },
+  "limbmovement-twitch": { fill: "rgba(130,201,30,.14)", line: "rgba(130,201,30,.5)" },
+};
+const STAGE_ROW = { wake: 0, rem: 1, n1: 2, n2: 3, n3: 4 };
+const STAGE_COLOR = { wake: "#e8590c", rem: "#3a86ff", n1: "#74c0fc", n2: "#4dabf7", n3: "#1864ab" };
+
+$("file").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $("error").textContent = "";
+  try {
+    edf = await parseHeader(file);
+    $("hdr").textContent =
+      `${file.name} - ${(file.size / 1e6).toFixed(0)} Mo - ${edf.ns} canaux - ` +
+      `${fmtDur(edf.totalDuration)} - début ${fmtClock(edf.startSecOfDay)}`;
+    buildStack();
+    $("nav").hidden = false;
+    $("tabs").hidden = false;
+    $("scoreBar").hidden = false;
+    showTab("respi");
+    $("t0").max = Math.max(0, Math.floor(edf.totalDuration - 60));
+    tryLoadScoring();   // cherche scoring.json à côté (si servi en HTTP)
+    render();
+  } catch (err) {
+    console.error(err);
+    $("error").textContent = "Parsing : " + (err.message || err);
+  }
+});
+
+async function tryLoadScoring() {
+  if (scoring) return;
+  try {
+    const r = await fetch("scoring.json");
+    if (r.ok) setScoring(await r.json(), "scoring.json (auto)");
+  } catch (e) { /* file:// : on attend le sélecteur */ }
+}
+
+$("scoreFile").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try { setScoring(JSON.parse(await f.text()), f.name); }
+  catch (err) { $("scoreState").textContent = "codage illisible : " + err.message; }
+});
+
+function setScoring(data, label) {
+  scoring = data;
+  const n = data.events ? data.events.length : 0;
+  $("scoreState").textContent = `${label} - ${data.hypnogram.length} époques, ${n} événements (rév. ${data.meta.revision})`;
+  $("showScore").checked = true;
+  buildHypnoLegend();
+  render();
+}
+
+$("showScore").addEventListener("change", () => {
+  $("hypnoStack").hidden = !($("showScore").checked && scoring);
+  render();
+});
+
+function buildHypnoLegend() {
+  $("hypnoLegend").innerHTML = Object.keys(STAGE_ROW)
+    .map(s => `<span style="color:${STAGE_COLOR[s]}">■</span>${s.toUpperCase()}`).join(" ");
+}
+
+async function parseHeader(file) {
+  const fixed = await file.slice(0, 256).arrayBuffer();
+  const headerBytes = parseInt(ascii(fixed, 184, 8), 10);
+  const nDataRecords = parseInt(ascii(fixed, 236, 8), 10);
+  const recDuration = parseFloat(ascii(fixed, 244, 8));
+  const ns = parseInt(ascii(fixed, 252, 4), 10);
+  const hbuf = await file.slice(256, 256 + ns * 256).arrayBuffer();
+  const blk = (base, size, i) => ascii(hbuf, base + i * size, size);
+  const b = 16 * ns + 80 * ns + 8 * ns;
+  const signals = [];
+  let recordBytes = 0;
+  const sigOffsets = [];
+  for (let i = 0; i < ns; i++) {
+    const pmin = parseFloat(blk(b, 8, i)), pmax = parseFloat(blk(b + 8 * ns, 8, i));
+    const dmin = parseFloat(blk(b + 16 * ns, 8, i)), dmax = parseFloat(blk(b + 24 * ns, 8, i));
+    const nsamp = parseInt(blk(b + 112 * ns, 8, i), 10);
+    signals.push({
+      index: i, label: blk(0, 16, i), unit: blk(16 * ns + 80 * ns, 8, i),
+      dmin, pmin, scale: (pmax - pmin) / (dmax - dmin), nsamp, fs: nsamp / recDuration,
+    });
+    sigOffsets.push(recordBytes);
+    recordBytes += nsamp * 2;
+  }
+  const [h, m, s] = ascii(fixed, 176, 8).split(/[.:]/).map(Number);
+  return {
+    file, headerBytes, nDataRecords, recDuration, ns, signals, recordBytes, sigOffsets,
+    totalDuration: nDataRecords * recDuration,
+    startSecOfDay: (h || 0) * 3600 + (m || 0) * 60 + (s || 0),
+  };
+}
+
+function buildStack() {
+  const stack = $("stack");
+  stack.innerHTML = "";
+  const resolve = list => {
+    for (const label of (list || [])) {
+      const s = edf.signals.find(x => x.label === label);
+      if (s) return s;
+    }
+    return null;
+  };
+  panels = RESPI_LAYOUT.map(def => {
+    const sigs = [resolve(def.match), resolve(def.match2)].filter(Boolean);
+    const row = document.createElement("div");
+    row.className = "row";
+    const lbl = document.createElement("div");
+    lbl.className = "lbl" + (sigs.length ? "" : " missing");
+    let desc;
+    if (!sigs.length) desc = "canal absent";
+    else if (sigs.length === 1) desc = `${sigs[0].label} · ${def.unit || sigs[0].unit}`;
+    else desc = sigs.map((s, i) => `<span class="t${i}">${s.label}</span>`).join(" / ");
+    lbl.innerHTML = `<b>${def.name}</b><span>${desc}</span>`;
+    const canvas = document.createElement("canvas");
+    canvas.width = 2000; canvas.height = 78;
+    row.append(lbl, canvas);
+    stack.append(row);
+    return { def, sigs, canvas };
+  });
+  const axis = document.createElement("div");
+  axis.className = "row axis";
+  axis.innerHTML = `<div class="lbl"></div><div class="ticks" id="ticks"></div>`;
+  stack.append(axis);
+}
+
+$("prev").addEventListener("click", () => step(-1));
+$("next").addEventListener("click", () => step(1));
+$("go").addEventListener("click", render);
+function step(dir) {
+  const win = winSec();
+  $("t0").value = Math.max(0, Math.min(edf.totalDuration - win, (+$("t0").value || 0) + dir * win));
+  render();
+}
+function winSec() { return Math.max(30, (parseFloat($("win").value) || 5) * 60); }
+
+async function render() {
+  if (!edf) return;
+  const t0 = Math.max(0, Math.min(edf.totalDuration - 1, parseFloat($("t0").value) || 0));
+  const dur = Math.min(winSec(), edf.totalDuration - t0);
+  const hp = $("hp").checked;
+  const fc = Math.max(0.001, parseFloat($("fc").value) || 0.03);
+
+  const r0 = Math.floor(t0 / edf.recDuration);
+  const r1 = Math.min(edf.nDataRecords, Math.ceil((t0 + dur) / edf.recDuration));
+  const buf = await edf.file.slice(
+    edf.headerBytes + r0 * edf.recordBytes,
+    edf.headerBytes + r1 * edf.recordBytes
+  ).arrayBuffer();
+  const view = new DataView(buf);
+  const nRec = r1 - r0;
+
+  for (const p of panels) {
+    if (!p.sigs.length) { clearCanvas(p.canvas); continue; }
+    const traces = p.sigs.map(sig => {
+      const { nsamp, dmin, scale, pmin } = sig;
+      const raw = new Float64Array(nsamp * nRec);
+      let w = 0;
+      for (let r = 0; r < nRec; r++) {
+        let off = r * edf.recordBytes + edf.sigOffsets[sig.index];
+        for (let k = 0; k < nsamp; k++, off += 2) raw[w++] = (view.getInt16(off, true) - dmin) * scale + pmin;
+      }
+      const from = Math.round((t0 - r0 * edf.recDuration) * sig.fs);
+      const count = Math.round(dur * sig.fs);
+      let series = raw.subarray(from, from + count);
+      if (hp) series = highpass(series, sig.fs, fc);
+      return series;
+    });
+    drawWaves(p.canvas, traces);
+    if (showScore()) drawOverlay(p.canvas, p.def.name, t0, dur);
+  }
+
+  drawHypnogram(t0, dur);
+
+  const ticks = $("ticks");
+  ticks.innerHTML = "";
+  for (let k = 0; k <= 5; k++) {
+    const sp = document.createElement("span");
+    sp.textContent = fmtClock(edf.startSecOfDay + t0 + (k / 5) * dur);
+    ticks.append(sp);
+  }
+  $("clock").textContent = `${fmtClock(edf.startSecOfDay + t0)} → ${fmtClock(edf.startSecOfDay + t0 + dur)}`;
+}
+
+function showScore() { return scoring && $("showScore").checked; }
+
+// événements de ce panneau, superposés en rectangles
+function drawOverlay(cv, panelName, t0, dur) {
+  const groups = Object.keys(GROUP_TO_PANEL).filter(g => GROUP_TO_PANEL[g].includes(panelName));
+  if (!groups.length) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const x = t => ((t - t0) / dur) * W;
+  ctx.save();
+  ctx.font = "10px system-ui";
+  ctx.textBaseline = "top";
+  for (const ev of scoring.events) {
+    if (!groups.includes(ev.group)) continue;
+    if (ev.t1 < t0 || ev.t0 > t0 + dur) continue;
+    const st = EVENT_STYLE[ev.type] || { fill: "rgba(120,120,120,.25)", line: "#888" };
+    let a = x(ev.t0), b = x(ev.t1);
+    if (b - a < 1) b = a + 1;
+    ctx.fillStyle = st.fill;
+    ctx.fillRect(a, 0, b - a, H);
+    ctx.strokeStyle = st.line;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(a + 0.5, 0.5, b - a - 1, H - 1);
+    if (b - a > 34) {
+      ctx.fillStyle = st.line;
+      ctx.fillText(ev.type.replace(/^apnea-|^oxygensaturation-|^limbmovement-/, ""), a + 3, 2);
+    }
+  }
+  ctx.restore();
+}
+
+function drawHypnogram(t0, dur) {
+  if (!showScore()) return;
+  const cv = $("hypnoCv");
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  const rows = 5, rh = H / rows;
+  const x = t => ((t - t0) / dur) * W;
+  const yRow = r => r * rh + rh / 2;
+
+  ctx.strokeStyle = "#8882"; ctx.lineWidth = 1;
+  for (let r = 1; r < rows; r++) { ctx.beginPath(); ctx.moveTo(0, r * rh); ctx.lineTo(W, r * rh); ctx.stroke(); }
+
+  // escalier des stades
+  ctx.lineWidth = 2;
+  let prev = null;
+  for (const ep of scoring.hypnogram) {
+    if (ep.t1 < t0 || ep.t0 > t0 + dur) { prev = null; continue; }
+    const row = STAGE_ROW[ep.stage]; if (row == null) { prev = null; continue; }
+    const a = x(ep.t0), b = x(ep.t1), y = yRow(row);
+    ctx.strokeStyle = STAGE_COLOR[ep.stage];
+    ctx.beginPath(); ctx.moveTo(a, y); ctx.lineTo(b, y); ctx.stroke();
+    if (prev && prev.t1 === ep.t0 && prev.row !== row) {
+      ctx.strokeStyle = "#888";
+      ctx.beginPath(); ctx.moveTo(a, yRow(prev.row)); ctx.lineTo(a, y); ctx.stroke();
+    }
+    prev = { t1: ep.t1, row };
+  }
+
+  // micro-éveils : traits rouges en haut
+  ctx.strokeStyle = EVENT_STYLE.arousal.line; ctx.lineWidth = 2;
+  for (const ev of scoring.events) {
+    if (ev.group !== "arousal") continue;
+    if (ev.t1 < t0 || ev.t0 > t0 + dur) continue;
+    const a = x(ev.t0);
+    ctx.beginPath(); ctx.moveTo(a, 0); ctx.lineTo(a, rh * 0.5); ctx.stroke();
+  }
+}
+
+function highpass(x, fs, fc) {
+  const dt = 1 / fs, rc = 1 / (2 * Math.PI * fc), a = rc / (rc + dt);
+  const y = new Float64Array(x.length);
+  let yp = 0, xp = x.length ? x[0] : 0;
+  for (let i = 0; i < x.length; i++) { yp = a * (yp + x[i] - xp); xp = x[i]; y[i] = yp; }
+  return y;
+}
+
+function clearCanvas(cv) {
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = "#8886"; ctx.font = "11px system-ui";
+  ctx.fillText("-", 6, cv.height / 2);
+}
+
+const TRACE_COLORS = ["#3a86ff", "#e8590c"];
+
+// bornes robustes (percentiles) d'une série
+function robustRange(values) {
+  const s = Array.prototype.slice.call(values).sort((a, b) => a - b);
+  const q = p => s[Math.max(0, Math.min(s.length - 1, Math.round(p * (s.length - 1))))];
+  let lo = q(0.01), hi = q(0.99);
+  if (lo === hi) { lo -= 1; hi += 1; }
+  return [lo, hi];
+}
+
+function drawWaves(cv, traces) {
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  traces = traces.filter(t => t && t.length);
+  if (!traces.length) return;
+
+  const multi = traces.length > 1;
+  const top = H * 0.10, band = H * 0.80;
+
+  // une courbe : échelle vraie + ligne du zéro
+  // plusieurs : chaque courbe normalisée dans sa propre bande, pour comparer les formes
+  if (!multi) {
+    let [lo, hi] = robustRange(traces[0]);
+    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+    const y = v => top + band * (1 - (v - lo) / (hi - lo));
+    if (lo < 0 && hi > 0) {
+      ctx.strokeStyle = "#8883"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, y(0)); ctx.lineTo(W, y(0)); ctx.stroke();
+    }
+    strokeSeries(ctx, traces[0], W, y, TRACE_COLORS[0], 1);
+    return;
+  }
+
+  traces.forEach((values, ti) => {
+    let [lo, hi] = robustRange(values);
+    const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+    const y = v => top + band * (1 - (v - lo) / (hi - lo));
+    strokeSeries(ctx, values, W, y, TRACE_COLORS[ti % TRACE_COLORS.length], ti === 0 ? 1 : 1.1);
+  });
+}
+
+// tracé polyligne, avec décimation préservant les pics (min puis max par colonne, dans l'ordre temporel)
+function strokeSeries(ctx, values, W, y, color, lineWidth) {
+  const n = values.length;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  if (n <= W * 2) {
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * W, py = y(values[i]);
+      i ? ctx.lineTo(x, py) : ctx.moveTo(x, py);
+    }
+  } else {
+    let started = false;
+    for (let px = 0; px < W; px++) {
+      const i0 = Math.floor((px / W) * n);
+      const i1 = Math.max(i0 + 1, Math.floor(((px + 1) / W) * n));
+      let mn = Infinity, mx = -Infinity, mnI = i0, mxI = i0;
+      for (let i = i0; i < i1; i++) {
+        const v = values[i];
+        if (v < mn) { mn = v; mnI = i; }
+        if (v > mx) { mx = v; mxI = i; }
+      }
+      const first = mnI <= mxI ? mn : mx;
+      const second = mnI <= mxI ? mx : mn;
+      if (!started) { ctx.moveTo(px, y(first)); started = true; }
+      else ctx.lineTo(px, y(first));
+      ctx.lineTo(px, y(second));
+    }
+  }
+  ctx.stroke();
+}
+
+// --- onglets ---
+$("tabRespi").addEventListener("click", () => showTab("respi"));
+$("tabNeuro").addEventListener("click", () => showTab("neuro"));
+function showTab(which) {
+  const respi = which === "respi";
+  $("tabRespi").setAttribute("aria-selected", respi);
+  $("tabNeuro").setAttribute("aria-selected", !respi);
+  $("respiView").classList.toggle("hidden", !respi);
+  $("neuroView").classList.toggle("hidden", respi);
+}
+
+function fmtDur(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return `${h} h ${String(m).padStart(2, "0")}`;
+}
+function fmtClock(sec) {
+  const t = ((sec % 86400) + 86400) % 86400;
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+</script>
+
+</body>
+</html>

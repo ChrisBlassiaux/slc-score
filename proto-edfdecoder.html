@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proto EDF+ - avec librairie (edfdecoder)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; max-width: 1100px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { opacity: .7; margin: 0 0 20px; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 0 0 18px; padding: 14px 16px; }
+  legend { padding: 0 6px; font-weight: 600; }
+  label { display: inline-block; margin-right: 14px; }
+  input[type=number] { width: 90px; }
+  button { cursor: pointer; padding: 6px 14px; border-radius: 6px; border: 1px solid #8886; background: #8882; }
+  button:disabled { opacity: .4; cursor: default; }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 24px; }
+  .meta-grid div span { opacity: .6; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #8883; }
+  th { position: sticky; top: 0; background: Canvas; }
+  .scroll { max-height: 260px; overflow: auto; border: 1px solid #8883; border-radius: 6px; }
+  canvas { width: 100%; height: 320px; border: 1px solid #8884; border-radius: 6px; background: #8881; display: block; }
+  .warn { color: #c60; }
+  .err { color: #c33; white-space: pre-wrap; }
+  .ok { color: #2a2; }
+  #plotInfo, #perf { font-size: 12px; opacity: .8; margin: 6px 0 0; white-space: pre-wrap; }
+  .hidden { display: none; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/edfdecoder@0.1.2/dist/edfdecoder.umd.min.js"></script>
+</head>
+<body>
+
+<h1>Prototype EDF+ - avec librairie <code>edfdecoder</code></h1>
+<p class="sub">
+  Même objectif que <code>index.html</code>, mais le parsing est délégué à la librairie
+  <a href="https://github.com/Pixpipe/edfdecoder">edfdecoder</a> (chargée depuis un CDN, connexion requise).
+</p>
+
+<fieldset>
+  <legend>Fichier</legend>
+  <input type="file" id="file" accept=".edf,.bdf">
+  <p>
+    <label><input type="radio" name="mode" value="trunc" checked> Décoder les 5 premières minutes (sûr)</label>
+    <label><input type="radio" name="mode" value="full"> Décoder le fichier entier</label>
+  </p>
+  <p class="warn" id="modeWarn"></p>
+  <button id="go" disabled>Décoder</button>
+  <p id="status"></p>
+  <p id="perf"></p>
+  <p id="error" class="err"></p>
+</fieldset>
+
+<div id="result" class="hidden">
+
+  <fieldset>
+    <legend>Métadonnées (via edfdecoder)</legend>
+    <div class="meta-grid" id="meta"></div>
+    <p class="warn" id="libNotes"></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Canaux (<span id="nsig"></span>)</legend>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>#</th><th>Label</th><th>Unité</th><th>Fréq. (Hz)</th><th>Éch./record</th></tr></thead>
+        <tbody id="sigRows"></tbody>
+      </table>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Tracé d'un signal</legend>
+    <label>Canal <select id="chan"></select></label>
+    <label>Début (s) <input type="number" id="t0" value="0" min="0" step="10"></label>
+    <label>Durée (s) <input type="number" id="dur" value="30" min="1" max="300"></label>
+    <button id="draw">Afficher</button>
+    <br>
+    <label><input type="checkbox" id="hp"> Filtre passe-haut</label>
+    <label>Coupure (Hz) <input type="number" id="fc" value="0.03" min="0.001" max="5" step="0.01"></label>
+    <p id="plotInfo"></p>
+    <canvas id="cv" width="1040" height="320"></canvas>
+  </fieldset>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+const ascii = (buf, off, len) => new TextDecoder("latin1").decode(new Uint8Array(buf, off, len)).trim();
+const MB = n => (n / 1048576).toFixed(0);
+
+let lib = null;         // { edf, signals[], recDuration, nRecords, startSecOfDay }
+let selectedFile = null;
+
+if (typeof edfdecoder === "undefined") {
+  $("error").textContent =
+    "La librairie edfdecoder n'a pas pu être chargée depuis le CDN. Vérifie ta connexion, puis recharge la page.";
+}
+
+$("file").addEventListener("change", e => {
+  selectedFile = e.target.files[0] || null;
+  $("go").disabled = !selectedFile;
+  $("result").classList.add("hidden");
+  $("error").textContent = "";
+  updateModeWarn();
+});
+
+document.querySelectorAll('input[name=mode]').forEach(r => r.addEventListener("change", updateModeWarn));
+
+function currentMode() {
+  return document.querySelector('input[name=mode]:checked').value;
+}
+
+function updateModeWarn() {
+  if (currentMode() === "full" && selectedFile) {
+    $("modeWarn").textContent =
+      `edfdecoder décode TOUT le fichier en mémoire (signaux bruts + physiques). Pour ${MB(selectedFile.size)} Mo ` +
+      `cela peut consommer plus de 2 Go de RAM et figer ou faire planter l'onglet. C'est justement ce qu'on veut mesurer.`;
+  } else {
+    $("modeWarn").textContent = "";
+  }
+}
+
+$("go").addEventListener("click", async () => {
+  if (!selectedFile || typeof edfdecoder === "undefined") return;
+  $("error").textContent = "";
+  $("result").classList.add("hidden");
+  $("go").disabled = true;
+  const mode = currentMode();
+
+  try {
+    $("status").textContent = "Préparation du buffer...";
+    const tPrep0 = performance.now();
+    const { buffer, info } = mode === "full"
+      ? { buffer: await selectedFile.arrayBuffer(), info: null }
+      : await buildTruncatedBuffer(selectedFile, 5);
+    const tPrep = performance.now() - tPrep0;
+
+    $("status").textContent = "Décodage par edfdecoder (peut prendre plusieurs secondes)...";
+    await new Promise(r => setTimeout(r, 30)); // laisse l'UI se rafraîchir
+
+    const memBefore = performance.memory ? performance.memory.usedJSHeapSize : null;
+    const tDec0 = performance.now();
+    const decoder = new edfdecoder.EdfDecoder();
+    decoder.setInput(buffer);
+    decoder.decode();
+    const edf = decoder.getOutput();
+    const tDec = performance.now() - tDec0;
+    const memAfter = performance.memory ? performance.memory.usedJSHeapSize : null;
+
+    if (!edf) throw new Error("edfdecoder.getOutput() a renvoyé null : le fichier n'a pas pu être décodé.");
+
+    lib = buildModel(edf, buffer);
+    renderMeta(lib, selectedFile, mode, info);
+    renderPerf({ tPrep, tDec, bufBytes: buffer.byteLength, memBefore, memAfter });
+    $("status").textContent = "";
+    $("result").classList.remove("hidden");
+  } catch (err) {
+    console.error(err);
+    $("status").textContent = "";
+    $("error").textContent = "Échec : " + (err && err.message ? err.message : err) +
+      "\n(Si l'onglet a failli planter en mode « fichier entier », c'est le résultat attendu : voir la note.)";
+  } finally {
+    $("go").disabled = false;
+  }
+});
+
+// --- échafaudage hors test : lit juste l'en-tête pour tronquer proprement le fichier ---
+// (edfdecoder ne sait pas décoder un sous-ensemble ; on lui fournit un buffer plus court
+//  et on réécrit le champ « nombre de data records » pour rester cohérent)
+async function buildTruncatedBuffer(file, minutes) {
+  const fixed = await file.slice(0, 256).arrayBuffer();
+  const headerBytes = parseInt(ascii(fixed, 184, 8), 10);
+  const recDur = parseFloat(ascii(fixed, 244, 8));
+  const ns = parseInt(ascii(fixed, 252, 4), 10);
+  const sigHead = await file.slice(256, 256 + ns * 256).arrayBuffer();
+  const nsampBase = 16 * ns + 80 * ns + 120 * ns;
+  let recordBytes = 0;
+  for (let i = 0; i < ns; i++) recordBytes += parseInt(ascii(sigHead, nsampBase + i * 8, 8), 10) * 2;
+
+  const nRec = Math.min(
+    parseInt(ascii(fixed, 236, 8), 10),
+    Math.ceil((minutes * 60) / recDur)
+  );
+  const total = headerBytes + nRec * recordBytes;
+  const buffer = await file.slice(0, total).arrayBuffer();
+
+  // réécrit les 8 octets « number of data records » (offset 236)
+  const patch = new TextEncoder().encode(String(nRec).padEnd(8, " "));
+  new Uint8Array(buffer).set(patch, 236);
+
+  return { buffer, info: { nRec, recDur, recordBytes, headerBytes, truncatedMinutes: minutes } };
+}
+
+function buildModel(edf, buffer) {
+  const signals = [];
+  const n = edf.getNumberOfSignals();
+  for (let i = 0; i < n; i++) {
+    signals.push({
+      index: i,
+      label: (edf.getSignalLabel(i) || "").trim(),
+      unit: (edf.getSignalPhysicalUnit(i) || "").trim(),
+      fs: edf.getSignalSamplingFrequency(i),
+      nsamp: edf.getSignalNumberOfSamplesPerRecord(i),
+    });
+  }
+  // heure de début : on la relit nous-mêmes (edfdecoder a un bug de Date, cf. note)
+  const [h, m, s] = ascii(buffer, 176, 8).split(/[.:]/).map(Number);
+  return {
+    edf, signals,
+    recDuration: edf.getRecordDuration(),
+    nRecords: edf.getNumberOfRecords(),
+    startSecOfDay: (h || 0) * 3600 + (m || 0) * 60 + (s || 0),
+    patientId: (edf.getPatientID() || "").trim(),
+    startDateRaw: ascii(buffer, 168, 8) + " " + ascii(buffer, 176, 8).replace(/\./g, ":"),
+    reserved: ascii(buffer, 192, 44),
+  };
+}
+
+function renderMeta(d, file, mode, info) {
+  const rows = [
+    ["Fichier", file.name],
+    ["Mode", mode === "full" ? "fichier entier" : `5 premières minutes (${info.nRec} records)`],
+    ["Type", d.reserved || "EDF"],
+    ["Patient (brut)", d.patientId],
+    ["Début (relu)", d.startDateRaw],
+    ["Durée d'un record", d.recDuration + " s"],
+    ["Nombre de records", d.nRecords],
+    ["Durée décodée", fmtDuration(d.nRecords * d.recDuration)],
+    ["Nombre de canaux", d.signals.length],
+  ];
+  $("meta").innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><br>${v || "-"}</div>`).join("");
+
+  $("libNotes").textContent =
+    "Note : edfdecoder.getRecordingStartDate() renvoie une date fausse sur ce fichier " +
+    "(année 1923, mois décalé de +1) à cause d'un bug interne de construction de Date. " +
+    "L'heure d'horloge affichée ici est relue directement dans l'en-tête, pas fournie par la librairie.";
+
+  $("nsig").textContent = d.signals.length;
+  $("sigRows").innerHTML = d.signals.map(s => `
+    <tr><td>${s.index}</td><td>${s.label}</td><td>${s.unit || "-"}</td><td>${s.fs}</td><td>${s.nsamp}</td></tr>`
+  ).join("");
+
+  $("chan").innerHTML = d.signals
+    .map(s => `<option value="${s.index}">${s.index} - ${s.label} (${s.fs} Hz)</option>`).join("");
+  const pref = d.signals.find(s => /^Saturation$|Nasal Pressure|^ECG$|^Flow$/i.test(s.label));
+  if (pref) $("chan").value = pref.index;
+}
+
+function renderPerf({ tPrep, tDec, bufBytes, memBefore, memAfter }) {
+  const lines = [
+    `Buffer fourni à edfdecoder : ${MB(bufBytes)} Mo`,
+    `Préparation du buffer : ${tPrep.toFixed(0)} ms`,
+    `decode() : ${tDec.toFixed(0)} ms`,
+  ];
+  if (memBefore != null) {
+    lines.push(`Heap JS : ${MB(memBefore)} Mo avant → ${MB(memAfter)} Mo après (delta ${MB(memAfter - memBefore)} Mo)`);
+  } else {
+    lines.push("Mesure mémoire indisponible (performance.memory absent sur ce navigateur).");
+  }
+  $("perf").textContent = lines.join("\n");
+}
+
+function fmtDuration(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.round(sec % 60);
+  return `${h} h ${String(m).padStart(2, "0")} min ${String(s).padStart(2, "0")} s`;
+}
+
+function fmtClock(sec) {
+  const t = ((sec % 86400) + 86400) % 86400;
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = Math.floor(t % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function highpassFilter(x, fs, fc) {
+  const dt = 1 / fs, rc = 1 / (2 * Math.PI * fc), a = rc / (rc + dt);
+  const y = new Array(x.length);
+  let yp = 0, xp = x.length ? x[0] : 0;
+  for (let i = 0; i < x.length; i++) { yp = a * (yp + x[i] - xp); xp = x[i]; y[i] = yp; }
+  return y;
+}
+
+$("draw").addEventListener("click", () => {
+  if (!lib) return;
+  $("error").textContent = "";
+  const sig = lib.signals[parseInt($("chan").value, 10)];
+  const t0 = Math.max(0, parseFloat($("t0").value) || 0);
+  const dur = Math.min(300, Math.max(1, parseFloat($("dur").value) || 30));
+  const hp = $("hp").checked;
+  const fc = Math.max(0.001, parseFloat($("fc").value) || 0.03);
+
+  try {
+    const total = lib.nRecords * lib.recDuration;
+    const start = Math.min(t0, Math.max(0, total - dur));
+    const r0 = Math.floor(start / lib.recDuration);
+    const r1 = Math.min(lib.nRecords, Math.ceil((start + dur) / lib.recDuration));
+
+    // API edfdecoder : renvoie un Float32Array déjà mis à l'échelle
+    const arr = lib.edf.getPhysicalSignalConcatRecords(sig.index, r0, r1 - r0);
+    if (!arr) throw new Error("getPhysicalSignalConcatRecords a renvoyé null (records hors du buffer décodé ?)");
+
+    let series = Array.from(arr);
+    if (hp) series = highpassFilter(series, sig.fs, fc);
+    const from = Math.round((start - r0 * lib.recDuration) * sig.fs);
+    const count = Math.round(dur * sig.fs);
+    const values = series.slice(from, from + count);
+
+    drawSignal(values, sig, start, values.length / sig.fs, lib.startSecOfDay, hp);
+    $("plotInfo").textContent =
+      `${sig.label} - ${values.length.toLocaleString("fr")} points, ${sig.fs} Hz, ` +
+      `${fmtClock(lib.startSecOfDay + start)}–${fmtClock(lib.startSecOfDay + start + values.length / sig.fs)}` +
+      (hp ? `, passe-haut ${fc} Hz` : "") + ".";
+  } catch (err) {
+    console.error(err);
+    $("error").textContent = "Erreur de lecture : " + (err && err.message ? err.message : err);
+  }
+});
+
+function drawSignal(values, sig, tStart, tDur, clockStart, centered) {
+  const cv = $("cv"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const padL = 60, padR = 12, padT = 12, padB = 26;
+  ctx.clearRect(0, 0, W, H);
+  if (!values.length) { ctx.fillStyle = "#888"; ctx.fillText("Aucune donnée.", padL, H / 2); return; }
+
+  const sorted = values.slice().sort((a, b) => a - b);
+  const q = p => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(p * (sorted.length - 1))))];
+  let min = q(0.01), max = q(0.99);
+  if (centered) { const a = Math.max(Math.abs(min), Math.abs(max)) || 1; min = -a; max = a; }
+  if (min === max) { min -= 1; max += 1; }
+  const pad = (max - min) * 0.08; min -= pad; max += pad;
+
+  const x = i => padL + (i / (values.length - 1)) * (W - padL - padR);
+  const y = v => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
+
+  ctx.strokeStyle = "#8886"; ctx.fillStyle = "#888"; ctx.font = "11px system-ui, sans-serif";
+  ctx.beginPath();
+  ctx.moveTo(padL, padT); ctx.lineTo(padL, H - padB); ctx.lineTo(W - padR, H - padB); ctx.stroke();
+
+  if (min < 0 && max > 0) {
+    ctx.strokeStyle = "#8884"; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(padL, y(0)); ctx.lineTo(W - padR, y(0)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.fillStyle = "#888"; ctx.textAlign = "right";
+  ctx.fillText(max.toFixed(2), padL - 6, padT + 8);
+  ctx.fillText(min.toFixed(2), padL - 6, H - padB);
+  ctx.fillText(sig.unit || "", padL - 6, (padT + H - padB) / 2);
+
+  for (let k = 0; k <= 2; k++) {
+    const frac = k / 2;
+    ctx.textAlign = k === 0 ? "left" : k === 2 ? "right" : "center";
+    ctx.fillText(fmtClock(clockStart + tStart + frac * tDur), padL + frac * (W - padL - padR), H - padB + 16);
+  }
+
+  ctx.strokeStyle = "#e8590c"; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < values.length; i++) {
+    const px = x(i), py = y(values[i]);
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test 2 - Écran de correction (§6.6)</title>
+<style>
+  :root { color-scheme: light; --line: #ddd; --ref: #3a86ff; --cand: #e8590c; }
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 14px; background: #fff; color: #1a1a1a; }
+  a { color: #1c6dd0; }
+  a.back { font-size: 12px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  h2 { font-size: 12px; margin: 14px 0 4px; color: #555; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 8px 0; }
+  .bar label { white-space: nowrap; }
+  input { background: #fff; color: #1a1a1a; border: 1px solid #ccc; border-radius: 4px; }
+  input[type=number] { width: 64px; }
+  input[type=text].time { width: 84px; }
+  button { cursor: pointer; padding: 4px 12px; border-radius: 6px; border: 1px solid #ccc; background: #f4f4f4; color: #1a1a1a; }
+  button:hover { background: #ececec; }
+  .hint { font-size: 11px; color: #777; }
+  .err { color: #c1121f; white-space: pre-wrap; }
+
+  .modes { display: flex; gap: 4px; margin: 10px 0; }
+  .modes button.active { background: #1c7ed6; border-color: #1c7ed6; color: #fff; }
+
+  #legend { font-size: 11px; color: #444; margin: 8px 0; display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; }
+  #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  #errList { font-size: 11px; color: #666; margin: 2px 0 10px; }
+  #errList li { margin: 1px 0; }
+
+  #scrollx { overflow-x: auto; overflow-y: hidden; }
+  .stack { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #fff; width: max-content; }
+  .stackHead { padding: 4px 8px; font-size: 11px; font-weight: 600; background: #f4f4f4; border-bottom: 1px solid var(--line); }
+  .stackHead.ref { color: var(--ref); }
+  .stackHead.cand { color: var(--cand); }
+  .stackWrap + .stackWrap { margin-top: 10px; }
+  .row { display: grid; grid-template-columns: 150px var(--trace-w, 1380px); border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: none; }
+  .row .lbl { padding: 3px 8px; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; font-size: 11px; position: sticky; left: 0; background: #fff; }
+  .row .lbl b { font-weight: 600; }
+  .row canvas { display: block; width: var(--trace-w, 1380px); height: 80px; background: #fff; }
+  .row.axis { background: #fafafa; }
+  .row.axis .ticks { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 11px; color: #777; }
+</style>
+</head>
+<body>
+
+<a class="back" href="./">← tests</a>
+<h1>Test 2 - Les deux options d'écran de correction (§6.6)</h1>
+<p class="hint">Échantillon volontairement réduit à 3 canaux (Flux nasal, Thorax, Abdomen) : l'objectif est de comparer les deux modes de lecture, pas de revalider l'affichage complet (déjà fait en Test 1).</p>
+
+<div class="modes" id="modes" hidden>
+  <button data-mode="A">Option A - Superposition</button>
+  <button data-mode="B">Option B - Vues synchronisées</button>
+</div>
+
+<div class="bar" id="nav" hidden>
+  <button id="prev">◀ Fenêtre précédente</button>
+  <button id="next">Fenêtre suivante ▶</button>
+  <label>Aller à <input type="text" class="time" id="goto" placeholder="hh:mm:ss"></label>
+  <label>Fenêtre (min) <input type="number" id="win" value="5" min="1" max="15" step="0.5"></label>
+  <span id="clock" class="hint"></span>
+</div>
+<p id="status" class="hint">chargement…</p>
+<p id="error" class="err"></p>
+
+<div id="legend" hidden>
+  <span><span class="sw" style="background:var(--ref)"></span>Référence</span>
+  <span><span class="sw" style="background:var(--cand)"></span>Candidat</span>
+  <span class="hint">chevauchement = zones colorées superposées</span>
+</div>
+<ul id="errList"></ul>
+
+<div id="scrollx">
+  <div id="viewA"></div>
+  <div id="viewB"></div>
+</div>
+
+<script type="module">
+import { openRemoteEdf, readWindow, highpass, lowpass, fmtClock, fmtDur } from "../lib/edf-reader.js";
+import { buildMontage, GROUP_TO_PANEL } from "../lib/nox-layout.js";
+import { drawWaves, drawEventOverlay, clearCanvas, fitCanvas } from "../lib/trace-render.js";
+import { loadScoring, makeCandidate } from "../lib/scoring.js";
+
+const $ = id => document.getElementById(id);
+const EDF_URL = "../enregistement-nox-complet.edf";
+const SCORING_URL = "../scoring.json";
+const MONTAGE_URL = "../montage.json";
+const SAMPLE_LABELS = ["Flux nasal (Lunette)", "Thorax", "Abdomen"];
+const PX_MIN = 276;
+const PREROLL = 60;
+
+let edf = null, panels = [], reference = null, candidate = null;
+let t0 = 0, prefetch = null, mode = "A";
+
+function applyLayout() {
+  const w = winSec();
+  document.documentElement.style.setProperty("--trace-w", Math.round((w / 60) * PX_MIN) + "px");
+}
+
+boot();
+
+async function boot() {
+  try {
+    $("status").textContent = "lecture de l'en-tête…";
+    edf = await openRemoteEdf(EDF_URL);
+    const montage = await (await fetch(MONTAGE_URL)).json();
+    const mont = buildMontage(edf, montage, "Respi PSG");
+    panels = SAMPLE_LABELS
+      .map(l => mont.panels.find(p => p.label === l))
+      .filter(Boolean);
+
+    reference = await loadScoring(SCORING_URL);
+    candidate = makeCandidate(reference);
+    reference.events = reference.events.map(e => ({ ...e, origin: "reference" }));
+    candidate.events = candidate.events.map(e => ({ ...e, origin: "candidat" }));
+
+    applyLayout();
+    buildViews();
+    buildErrList();
+    $("status").textContent =
+      `${fmtDur(edf.totalDuration)} · début ${fmtClock(edf.startSecOfDay)} · ` +
+      `${reference.events.length} évts référence · ${candidate.events.length} évts candidat`;
+    $("nav").hidden = false;
+    $("modes").hidden = false;
+    $("legend").hidden = false;
+    setMode("A");
+    render();
+  } catch (err) {
+    console.error(err);
+    $("error").textContent = "Échec : " + (err.message || err) +
+      "\n(la page doit être servie : python3 serve.py, puis http://localhost:8000/tests/)";
+  }
+}
+
+function panelRow(p) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.innerHTML = `<div class="lbl"><b>${p.label}</b><span>${p.sig ? p.sig.label : "canal absent"}</span></div><canvas></canvas>`;
+  return { row, canvas: row.querySelector("canvas") };
+}
+
+function axisRow() {
+  const row = document.createElement("div");
+  row.className = "row axis";
+  row.innerHTML = `<div class="lbl"></div><div class="ticks"></div>`;
+  return row;
+}
+
+function buildViews() {
+  // Option A : un seul jeu de tracés, référence + candidat superposés dessus.
+  const stackA = document.createElement("div");
+  stackA.className = "stack";
+  panels.forEach(p => { const { row, canvas } = panelRow(p); p.cvA = canvas; stackA.append(row); });
+  const axisA = axisRow(); stackA.append(axisA);
+  $("viewA").innerHTML = "";
+  $("viewA").append(stackA);
+  $("viewA").dataset.ticks = "";
+  ticksTarget.A = axisA.querySelector(".ticks");
+
+  // Option B : deux jeux de tracés identiques, un par source, empilés.
+  $("viewB").innerHTML = "";
+  const wrapRef = document.createElement("div");
+  wrapRef.className = "stackWrap";
+  const headRef = document.createElement("div"); headRef.className = "stackHead ref"; headRef.textContent = "Référence";
+  const stackRef = document.createElement("div"); stackRef.className = "stack";
+  panels.forEach(p => { const { row, canvas } = panelRow(p); p.cvRef = canvas; stackRef.append(row); });
+  wrapRef.append(headRef, stackRef);
+
+  const wrapCand = document.createElement("div");
+  wrapCand.className = "stackWrap";
+  const headCand = document.createElement("div"); headCand.className = "stackHead cand"; headCand.textContent = "Candidat";
+  const stackCand = document.createElement("div"); stackCand.className = "stack";
+  panels.forEach(p => { const { row, canvas } = panelRow(p); p.cvCand = canvas; stackCand.append(row); });
+  const axisB = axisRow(); stackCand.append(axisB);
+  wrapCand.append(headCand, stackCand);
+  ticksTarget.B = axisB.querySelector(".ticks");
+
+  $("viewB").append(wrapRef, wrapCand);
+}
+
+const ticksTarget = { A: null, B: null };
+
+function buildErrList() {
+  $("errList").innerHTML = candidate.injectedErrors
+    .map(e => `<li><b>${e.kind}</b> (${e.type}) - ${e.note}</li>`).join("");
+}
+
+function setMode(m) {
+  mode = m;
+  $("viewA").hidden = mode !== "A";
+  $("viewB").hidden = mode !== "B";
+  [...$("modes").children].forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
+}
+$("modes").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-mode]");
+  if (!btn) return;
+  setMode(btn.dataset.mode);
+  // Les canvas de la vue jusque-là cachée ont clientWidth/Height=0 pendant que leur
+  // conteneur est `hidden` : fitCanvas() les avait donc calés sur 1x1px. Il faut
+  // refaire fitCanvas + redessiner maintenant que la vue est visible et mesurable.
+  render();
+});
+
+function winSec() { return Math.max(60, (parseFloat($("win").value) || 5) * 60); }
+function goTo(sec) {
+  t0 = Math.max(0, Math.min(edf.totalDuration - winSec(), sec));
+  render();
+}
+$("prev").addEventListener("click", () => goTo(t0 - winSec()));
+$("next").addEventListener("click", () => goTo(t0 + winSec()));
+$("win").addEventListener("change", () => { applyLayout(); goTo(t0); });
+$("goto").addEventListener("change", () => {
+  const v = $("goto").value.trim();
+  let s = null;
+  if (/^\d+$/.test(v)) s = +v;
+  else {
+    const m = v.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (m) {
+      const clk = (+m[1]) * 3600 + (+m[2]) * 60 + (+(m[3] || 0));
+      s = ((clk - edf.startSecOfDay) % 86400 + 86400) % 86400;
+    }
+  }
+  if (s != null) goTo(s);
+});
+
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+
+function readAt(start, dur) {
+  const idxs = [...new Set(panels.filter(p => p.sig).map(p => p.sig.index))];
+  return readWindow(edf, idxs, start, dur, { prerollSec: PREROLL });
+}
+
+function condition(p, series, fs) {
+  let s = series;
+  if (p.inverted) s = s.map(v => -v);
+  if (p.hp && p.hp < fs / 2) s = highpass(s, fs, p.hp);
+  if (p.lp && p.lp < fs / 2) s = lowpass(s, fs, p.lp);
+  return s;
+}
+
+const styleFor = ev => ev.origin === "reference"
+  ? { fill: "rgba(58,134,255,.35)", line: "#3a86ff" }
+  : { fill: "rgba(232,89,12,.35)", line: "#e8590c" };
+
+async function render() {
+  if (!edf) return;
+  const dur = Math.min(winSec(), edf.totalDuration - t0);
+  const key = `${t0}|${dur}`;
+
+  let win;
+  if (prefetch && prefetch.key === key) win = await prefetch.promise;
+  else win = await readAt(t0, dur);
+  const { byId, prerollById } = win;
+
+  const allCanvases = panels.flatMap(p => [p.cvA, p.cvRef, p.cvCand]);
+  allCanvases.forEach(fitCanvas);
+
+  for (const p of panels) {
+    if (!p.sig) { [p.cvA, p.cvRef, p.cvCand].forEach(clearCanvas); continue; }
+    const pre = prerollById[p.sig.index] || 0;
+    let s = condition(p, byId[p.sig.index], p.sig.fs);
+    if (pre) s = s.subarray ? s.subarray(pre) : s.slice(pre);
+
+    // Même restriction qu'en Test 1 : un groupe d'événements ne se superpose qu'à
+    // son panneau de référence NOX (resp -> Flux nasal uniquement), pas à tous les
+    // canaux de l'échantillon.
+    const groups = Object.keys(GROUP_TO_PANEL).filter(g => GROUP_TO_PANEL[g].includes(p.label));
+
+    // Option A : référence + candidat superposés en pleine hauteur sur le même tracé.
+    drawWaves(p.cvA, [s], { colors: [p.color], range: p.range });
+    if (groups.length) {
+      drawEventOverlay(p.cvA, reference.events, t0, dur, { groups, styleFor, label: false });
+      drawEventOverlay(p.cvA, candidate.events, t0, dur, { groups, styleFor, label: false });
+    }
+
+    // Option B : même tracé dessiné deux fois, un seul codage par vue.
+    drawWaves(p.cvRef, [s], { colors: [p.color], range: p.range });
+    drawWaves(p.cvCand, [s], { colors: [p.color], range: p.range });
+    if (groups.length) {
+      drawEventOverlay(p.cvRef, reference.events, t0, dur, { groups, styleFor, label: true });
+      drawEventOverlay(p.cvCand, candidate.events, t0, dur, { groups, styleFor, label: true });
+    }
+  }
+
+  for (const key of ["A", "B"]) {
+    const el = ticksTarget[key];
+    if (!el) continue;
+    el.innerHTML = "";
+    for (let k = 0; k <= 5; k++) {
+      const sp = document.createElement("span");
+      sp.textContent = fmtClock(edf.startSecOfDay + t0 + (k / 5) * dur);
+      el.append(sp);
+    }
+  }
+
+  const h = Math.floor(t0 / 3600), m = Math.floor((t0 % 3600) / 60);
+  $("clock").textContent =
+    `${fmtClock(edf.startSecOfDay + t0)} → ${fmtClock(edf.startSecOfDay + t0 + dur)}  (${h}h${String(m).padStart(2, "0")})`;
+
+  const nextT0 = Math.min(edf.totalDuration - dur, t0 + dur);
+  if (nextT0 > t0) prefetch = { key: `${nextT0}|${dur}`, promise: readAt(nextT0, dur) };
+}
+</script>
+
+</body>
+</html>

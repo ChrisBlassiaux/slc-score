@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proto EDF+ - parsing vanilla</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; max-width: 1100px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { opacity: .7; margin: 0 0 20px; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 0 0 18px; padding: 14px 16px; }
+  legend { padding: 0 6px; font-weight: 600; }
+  label { display: inline-block; margin-right: 14px; }
+  input[type=number] { width: 90px; }
+  button { cursor: pointer; padding: 6px 14px; border-radius: 6px; border: 1px solid #8886; background: #8882; }
+  button:disabled { opacity: .4; cursor: default; }
+  .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 24px; }
+  .meta-grid div span { opacity: .6; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid #8883; }
+  th { position: sticky; top: 0; background: Canvas; }
+  .scroll { max-height: 260px; overflow: auto; border: 1px solid #8883; border-radius: 6px; }
+  canvas { width: 100%; height: 320px; border: 1px solid #8884; border-radius: 6px; background: #8881; display: block; }
+  .warn { color: #c60; }
+  .err { color: #c33; white-space: pre-wrap; }
+  #plotInfo { font-size: 12px; opacity: .75; margin: 6px 0 0; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>Prototype EDF+ - parsing 100% vanilla</h1>
+<p class="sub">Aucune librairie, aucun framework. Lecture partielle du fichier via <code>File.slice()</code>.</p>
+
+<fieldset>
+  <legend>Fichier</legend>
+  <input type="file" id="file" accept=".edf,.bdf">
+  <p id="status"></p>
+  <p id="error" class="err"></p>
+</fieldset>
+
+<div id="result" class="hidden">
+
+  <fieldset>
+    <legend>Métadonnées</legend>
+    <div class="meta-grid" id="meta"></div>
+    <p id="annotWarn" class="warn"></p>
+  </fieldset>
+
+  <fieldset>
+    <legend>Canaux (<span id="nsig"></span>)</legend>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>#</th><th>Label</th><th>Unité</th><th>Fréq. (Hz)</th><th>Éch./record</th><th>Phys. min</th><th>Phys. max</th></tr></thead>
+        <tbody id="sigRows"></tbody>
+      </table>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Tracé d'un signal</legend>
+    <label>Canal
+      <select id="chan"></select>
+    </label>
+    <label>Début (s) <input type="number" id="t0" value="0" min="0" step="10"></label>
+    <label>Durée (s) <input type="number" id="dur" value="30" min="1" max="300"></label>
+    <button id="draw">Afficher</button>
+    <br>
+    <label><input type="checkbox" id="hp"> Filtre passe-haut</label>
+    <label>Coupure (Hz) <input type="number" id="fc" value="0.03" min="0.001" max="5" step="0.01"></label>
+    <p id="plotInfo"></p>
+    <canvas id="cv" width="1040" height="320"></canvas>
+  </fieldset>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+const ascii = (buf, off, len) => new TextDecoder("latin1").decode(new Uint8Array(buf, off, len)).trim();
+
+let edf = null; // { file, headerBytes, nDataRecords, recDuration, ns, signals[], recordBytes, sigOffsets[] }
+
+$("file").addEventListener("change", async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $("error").textContent = "";
+  $("result").classList.add("hidden");
+  $("status").textContent = `Lecture de l'en-tête de « ${file.name} » (${(file.size / 1e6).toFixed(0)} Mo)...`;
+  try {
+    edf = await parseHeader(file);
+    renderMeta(edf, file);
+    $("status").textContent = "En-tête lu. " + (edf.headerBytes) + " octets sur " + file.size + " chargés.";
+    $("result").classList.remove("hidden");
+  } catch (err) {
+    console.error(err);
+    $("status").textContent = "";
+    $("error").textContent = "Échec du parsing : " + (err && err.message ? err.message : err);
+  }
+});
+
+async function parseHeader(file) {
+  // 1. En-tête fixe : 256 octets
+  const fixed = await file.slice(0, 256).arrayBuffer();
+  const version = ascii(fixed, 0, 8);
+  const headerBytes = parseInt(ascii(fixed, 184, 8), 10);
+  const reserved = ascii(fixed, 192, 44);
+  const nDataRecords = parseInt(ascii(fixed, 236, 8), 10);
+  const recDuration = parseFloat(ascii(fixed, 244, 8));
+  const ns = parseInt(ascii(fixed, 252, 4), 10);
+
+  if (!Number.isFinite(ns) || ns <= 0) throw new Error("nombre de signaux invalide (" + ns + ")");
+  if (!Number.isFinite(headerBytes) || headerBytes < 256 + ns * 256)
+    throw new Error("taille d'en-tête incohérente");
+
+  // 2. En-tête par signal : ns * 256 octets, champs regroupés par type
+  const hbuf = await file.slice(256, 256 + ns * 256).arrayBuffer();
+  const block = (base, size, i) => ascii(hbuf, base + i * size, size);
+  const O = {
+    label: 0,
+    transducer: 16 * ns,
+    unit: 16 * ns + 80 * ns,
+    pmin: 16 * ns + 80 * ns + 8 * ns,
+    pmax: 16 * ns + 80 * ns + 16 * ns,
+    dmin: 16 * ns + 80 * ns + 24 * ns,
+    dmax: 16 * ns + 80 * ns + 32 * ns,
+    prefilter: 16 * ns + 80 * ns + 40 * ns,
+    nsamp: 16 * ns + 80 * ns + 120 * ns,
+  };
+
+  const signals = [];
+  let recordBytes = 0;
+  const sigOffsets = [];
+  for (let i = 0; i < ns; i++) {
+    const nsamp = parseInt(block(O.nsamp, 8, i), 10);
+    const pmin = parseFloat(block(O.pmin, 8, i));
+    const pmax = parseFloat(block(O.pmax, 8, i));
+    const dmin = parseFloat(block(O.dmin, 8, i));
+    const dmax = parseFloat(block(O.dmax, 8, i));
+    signals.push({
+      index: i,
+      label: block(O.label, 16, i),
+      unit: block(O.unit, 8, i),
+      pmin, pmax, dmin, dmax,
+      nsamp,
+      scale: (pmax - pmin) / (dmax - dmin),
+      fs: nsamp / recDuration,
+    });
+    sigOffsets.push(recordBytes);
+    recordBytes += nsamp * 2;
+  }
+
+  const expected = headerBytes + nDataRecords * recordBytes;
+  const sizeOk = expected === file.size;
+
+  return {
+    file, version, reserved, headerBytes, nDataRecords, recDuration, ns,
+    signals, recordBytes, sigOffsets,
+    totalDuration: nDataRecords * recDuration,
+    startDate: ascii(fixed, 168, 8),
+    startTime: ascii(fixed, 176, 8),
+    startSecOfDay: (() => {
+      const [h, m, s] = ascii(fixed, 176, 8).split(/[.:]/).map(Number);
+      return (h || 0) * 3600 + (m || 0) * 60 + (s || 0);
+    })(),
+    patient: ascii(fixed, 8, 80),
+    recording: ascii(fixed, 88, 80),
+    sizeOk, expectedSize: expected,
+  };
+}
+
+function fmtDuration(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.round(sec % 60);
+  return `${h} h ${String(m).padStart(2, "0")} min ${String(s).padStart(2, "0")} s`;
+}
+
+function renderMeta(d, file) {
+  const rows = [
+    ["Fichier", file.name],
+    ["Taille", (file.size / 1e6).toFixed(1) + " Mo"],
+    ["Version / type", (d.version || "0") + " / " + (d.reserved || "EDF")],
+    ["Patient (brut)", d.patient],
+    ["Enregistrement (brut)", d.recording],
+    ["Début", d.startDate + "  " + d.startTime.replace(/\./g, ":")],
+    ["Durée totale", fmtDuration(d.totalDuration)],
+    ["Data records", d.nDataRecords + " × " + d.recDuration + " s"],
+    ["Octets / record", d.recordBytes.toLocaleString("fr")],
+    ["En-tête", d.headerBytes + " octets"],
+    ["Nb de canaux", d.ns],
+    ["Contrôle taille", d.sizeOk ? "OK (recalcul = taille réelle)" : `écart : attendu ${d.expectedSize}, réel ${file.size}`],
+  ];
+  $("meta").innerHTML = rows.map(([k, v]) => `<div><span>${k}</span><br>${v || "-"}</div>`).join("");
+
+  const hasAnnot = d.signals.some(s => /EDF Annotations/i.test(s.label));
+  $("annotWarn").textContent = hasAnnot
+    ? ""
+    : "Aucun canal « EDF Annotations » : ce fichier ne contient pas d'événements/scoring, seulement les signaux bruts.";
+
+  $("nsig").textContent = d.ns;
+  $("sigRows").innerHTML = d.signals.map(s => `
+    <tr>
+      <td>${s.index}</td><td>${s.label}</td><td>${s.unit || "-"}</td>
+      <td>${s.fs}</td><td>${s.nsamp}</td>
+      <td>${s.pmin}</td><td>${s.pmax}</td>
+    </tr>`).join("");
+
+  $("chan").innerHTML = d.signals
+    .map(s => `<option value="${s.index}">${s.index} - ${s.label} (${s.fs} Hz)</option>`)
+    .join("");
+
+  // pré-sélection d'un signal parlant si présent
+  const pref = d.signals.find(s => /^Saturation$|Nasal Pressure|^Flow$/i.test(s.label));
+  if (pref) $("chan").value = pref.index;
+}
+
+$("draw").addEventListener("click", async () => {
+  if (!edf) return;
+  $("error").textContent = "";
+  const sig = edf.signals[parseInt($("chan").value, 10)];
+  const t0 = Math.max(0, parseFloat($("t0").value) || 0);
+  const dur = Math.min(300, Math.max(1, parseFloat($("dur").value) || 30));
+  const highpass = $("hp").checked;
+  const cutoffHz = Math.max(0.001, parseFloat($("fc").value) || 0.03);
+
+  try {
+    const { values, actualStart, actualDur, prerollUsed } =
+      await readSignalWindow(edf, sig, t0, dur, { highpass, cutoffHz });
+    drawSignal(values, sig, actualStart, actualDur, edf.startSecOfDay, highpass);
+    $("plotInfo").textContent =
+      `${sig.label} - ${values.length.toLocaleString("fr")} points, ${sig.fs} Hz, ` +
+      `${fmtClock(edf.startSecOfDay + actualStart)}–${fmtClock(edf.startSecOfDay + actualStart + actualDur)}. ` +
+      (highpass ? `Passe-haut ${cutoffHz} Hz, pré-charge ${prerollUsed.toFixed(0)} s. ` : "") +
+      `Octets lus : ${(readSignalWindow.lastBytes / 1024).toFixed(0)} Ko.`;
+  } catch (err) {
+    console.error(err);
+    $("error").textContent = "Erreur de lecture : " + (err && err.message ? err.message : err);
+  }
+});
+
+function fmtClock(sec) {
+  const t = ((sec % 86400) + 86400) % 86400;
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = Math.floor(t % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+// passe-haut une passe (IIR premier ordre), supprime la dérive lente
+function highpassFilter(x, fs, fc) {
+  const dt = 1 / fs;
+  const rc = 1 / (2 * Math.PI * fc);
+  const a = rc / (rc + dt);
+  const y = new Array(x.length);
+  let yp = 0, xp = x.length ? x[0] : 0;
+  for (let i = 0; i < x.length; i++) {
+    yp = a * (yp + x[i] - xp);
+    xp = x[i];
+    y[i] = yp;
+  }
+  return y;
+}
+
+async function readSignalWindow(d, sig, t0, dur, opts = {}) {
+  const start = Math.min(t0, Math.max(0, d.totalDuration - dur));
+  // pré-charge avant la fenêtre pour laisser le filtre se stabiliser
+  const preroll = opts.highpass ? Math.min(start, opts.prerollSec ?? 60) : 0;
+  const readStart = start - preroll;
+  const r0 = Math.floor(readStart / d.recDuration);
+  const r1 = Math.min(d.nDataRecords, Math.ceil((start + dur) / d.recDuration));
+  const byteStart = d.headerBytes + r0 * d.recordBytes;
+  const byteEnd = d.headerBytes + r1 * d.recordBytes;
+
+  const buf = await d.file.slice(byteStart, byteEnd).arrayBuffer();
+  readSignalWindow.lastBytes = buf.byteLength;
+  const view = new DataView(buf);
+
+  const raw = [];
+  const { nsamp, dmin, scale, pmin } = sig;
+  for (let r = 0; r < r1 - r0; r++) {
+    let p = r * d.recordBytes + d.sigOffsets[sig.index];
+    for (let k = 0; k < nsamp; k++, p += 2) {
+      raw.push((view.getInt16(p, true) - dmin) * scale + pmin);
+    }
+  }
+
+  const series = opts.highpass ? highpassFilter(raw, sig.fs, opts.cutoffHz ?? 0.03) : raw;
+
+  // découpe fine à la fenêtre demandée à l'intérieur des records lus
+  const from = Math.round((start - r0 * d.recDuration) * sig.fs);
+  const count = Math.round(dur * sig.fs);
+  const values = series.slice(from, from + count);
+  return { values, actualStart: start, actualDur: values.length / sig.fs, prerollUsed: preroll };
+}
+
+function drawSignal(values, sig, tStart, tDur, clockStart, centered) {
+  const cv = $("cv");
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height;
+  const padL = 60, padR = 12, padT = 12, padB = 26;
+  ctx.clearRect(0, 0, W, H);
+
+  if (!values.length) {
+    ctx.fillStyle = "#888";
+    ctx.fillText("Aucune donnée dans cette fenêtre.", padL, H / 2);
+    return;
+  }
+
+  // échelle robuste : percentiles 1/99 pour ignorer les pics isolés
+  const sorted = values.slice().sort((a, b) => a - b);
+  const q = p => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(p * (sorted.length - 1))))];
+  let min = q(0.01), max = q(0.99);
+  if (centered) { const a = Math.max(Math.abs(min), Math.abs(max)) || 1; min = -a; max = a; }
+  if (min === max) { min -= 1; max += 1; }
+  const pad = (max - min) * 0.08;
+  min -= pad; max += pad;
+
+  const x = i => padL + (i / (values.length - 1)) * (W - padL - padR);
+  const y = v => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
+
+  ctx.strokeStyle = "#8886";
+  ctx.fillStyle = "#888";
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.beginPath();
+  ctx.moveTo(padL, padT); ctx.lineTo(padL, H - padB); ctx.lineTo(W - padR, H - padB);
+  ctx.stroke();
+
+  // ligne du zéro si visible
+  if (min < 0 && max > 0) {
+    ctx.strokeStyle = "#8884";
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(padL, y(0)); ctx.lineTo(W - padR, y(0)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.fillStyle = "#888";
+  ctx.textAlign = "right";
+  ctx.fillText(max.toFixed(2), padL - 6, padT + 8);
+  ctx.fillText(min.toFixed(2), padL - 6, H - padB);
+  ctx.fillText(sig.unit || "", padL - 6, (padT + H - padB) / 2);
+
+  // axe temps en heure d'horloge : 3 graduations
+  ctx.textAlign = "center";
+  for (let k = 0; k <= 2; k++) {
+    const frac = k / 2;
+    ctx.textAlign = k === 0 ? "left" : k === 2 ? "right" : "center";
+    ctx.fillText(fmtClock(clockStart + tStart + frac * tDur),
+      padL + frac * (W - padL - padR), H - padB + 16);
+  }
+
+  ctx.strokeStyle = "#3a86ff";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < values.length; i++) {
+    const px = x(i), py = y(values[i]);
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Test 1 - Affichage tracés + codage façon NOX</title>
+<style>
+  :root { color-scheme: light; --line: #ddd; }
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 14px; background: #fff; color: #1a1a1a; }
+  a { color: #1c6dd0; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  a.back { font-size: 12px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 8px 0; }
+  .bar label { white-space: nowrap; }
+  input { background: #fff; color: #1a1a1a; border: 1px solid #ccc; border-radius: 4px; }
+  input[type=number] { width: 64px; }
+  input[type=text].time { width: 84px; }
+  button { cursor: pointer; padding: 4px 12px; border-radius: 6px; border: 1px solid #ccc; background: #f4f4f4; color: #1a1a1a; }
+  button:hover { background: #ececec; }
+  .err { color: #c1121f; white-space: pre-wrap; }
+  .hint { font-size: 11px; color: #777; }
+  .tabs { display: flex; gap: 4px; margin: 10px 0 4px; }
+  .tabs button { border-radius: 6px 6px 0 0; border-bottom: none; }
+  .tabs button.active { background: #fff; border-color: var(--line); font-weight: 600; box-shadow: inset 0 2px 0 #1c7ed6; }
+
+  /* --trace-w : largeur d'affichage des tracés, fixe, calquée sur l'étalement NOX.
+     La page défile horizontalement si la fenêtre est plus étroite. */
+  #scrollx { overflow-x: auto; overflow-y: hidden; }
+  .stack { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #fff; width: max-content; }
+  .stack + .stack { margin-top: 6px; }
+  .row { display: grid; grid-template-columns: 150px var(--trace-w, 1600px); border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: none; }
+  .row .lbl { padding: 3px 8px; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; font-size: 11px; position: sticky; left: 0; background: #fff; z-index: 1; }
+  .row .lbl b { font-weight: 600; }
+  .row .lbl span { color: #888; }
+  .row .lbl.missing b { color: #c60; }
+  .rescale { margin-top: 2px; font-size: 10px; padding: 1px 6px; border-radius: 10px; align-self: flex-start; }
+  .rescale.active { background: #1c7ed6; border-color: #1c7ed6; color: #fff; }
+  .row canvas { display: block; width: var(--trace-w, 1600px); height: 74px; background: #fff; }
+  /* L'hypnogramme montre toute la nuit en permanence (vision globale), pas la
+     fenêtre affichée : largeur propre, indépendante de --trace-w, jamais dans
+     la zone de défilement horizontal des tracés. */
+  #hypno { width: max-content; max-width: 100%; margin-bottom: 8px; }
+  #hypno .row { grid-template-columns: 150px minmax(300px, 900px); }
+  #hypno .row canvas { width: 100%; height: 66px; }
+  #hypno .row .lbl { position: static; }
+  .row.axis { background: #fafafa; }
+  .row.axis .ticks { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 11px; color: #777; }
+  #legend { font-size: 10px; color: #555; margin: 6px 0; }
+  #legend b { font-weight: 600; color: #1a1a1a; }
+</style>
+</head>
+<body>
+
+<a class="back" href="./">← tests</a>
+<h1>Test 1 - Affichage des tracés et du codage façon NOX</h1>
+
+<div class="tabs" id="tabs" hidden></div>
+<div class="bar" id="nav" hidden>
+  <button id="prev">◀ Fenêtre précédente</button>
+  <button id="next">Fenêtre suivante ▶</button>
+  <label>Aller à <input type="text" class="time" id="goto" placeholder="hh:mm:ss"></label>
+  <label>Fenêtre (min) <input type="number" id="win" value="5" min="0.5" max="15" step="0.5"></label>
+  <label>px/min <input type="number" id="pxmin" value="276" min="60" max="800" step="4"></label>
+  <label><input type="checkbox" id="showScore" checked> Afficher le codage</label>
+  <span id="clock" class="hint"></span>
+</div>
+<p id="status" class="hint">chargement…</p>
+<p id="error" class="err"></p>
+
+<div id="legend"></div>
+<div class="stack" id="hypno" hidden></div>
+<div id="scrollx">
+  <div class="stack" id="stack"></div>
+</div>
+
+<script type="module">
+import { openRemoteEdf, readWindow, highpass, lowpass, fmtClock, fmtDur } from "../lib/edf-reader.js";
+import { buildMontage, GROUP_TO_PANEL } from "../lib/nox-layout.js";
+import { drawWaves, drawHypnogram, drawEventOverlay, drawCategoryBand, clearCanvas, fitCanvas,
+  STAGE_COLOR, EVENT_STYLE, POSITION_LABEL, POSITION_COLOR } from "../lib/trace-render.js";
+import { loadScoring } from "../lib/scoring.js";
+
+const $ = id => document.getElementById(id);
+const EDF_URL = "../enregistement-nox-complet.edf";
+const SCORING_URL = "../scoring.json";
+const MONTAGE_URL = "../montage.json";
+const PREROLL = 60;
+
+let edf = null, montageData = null, mont = null, panels = [], scoring = null;
+let t0 = 0, prefetch = null;
+
+const SHEETS = ["Respi PSG", "Neuro", "Signaux EEG unipolaires"];
+
+// Canaux non verrouillés pour lesquels on propose un bouton "mise à l'échelle".
+// Indexé sur le type de signal du montage (stable), pas sur le libellé affiché :
+// NOX renomme parfois le même canal selon la feuille (ex. "Jambe gauche" sur
+// Respi PSG / Signaux EEG unipolaires, mais "Left Leg" sur Neuro).
+// "auto"     : défaut = recalcul sur la fenêtre affichée (détail) ; bouton = pleine plage
+//              physique du capteur (aplatit) - cas Thorax/Abdomen (RIP).
+// "physical" : défaut = pleine plage physique (bruit de fond écrasé, les gros écarts
+//              ressortent) ; bouton = recalcul sur la fenêtre (zoom) - cas EMG/Pléth.
+const RESCALE_MODE_BY_TYPE = {
+  "Resp.Movement-Inductive.Thorax": "auto",
+  "Resp.Movement-Inductive.Abdomen": "auto",
+  "Pleth": "physical",
+  "EMG.Tibialis-Leg.Left": "physical",
+  "EMG.Tibialis-Leg.Right": "physical",
+  // Pas l'EMG du menton (Submental) : contrairement à la jambe (silencieuse au
+  // repos), le tonus du menton doit rester visible en continu sur NOX - la
+  // pleine plage physique l'aplatirait à ~1% de la hauteur (vérifié sur les
+  // valeurs réelles). Reste donc sur le recalcul dynamique par défaut.
+};
+const autoScale = new Set();
+
+// Largeur calée sur la fenêtre de référence Respi PSG (celle pour laquelle 276 px/min
+// a été mesuré sur NOX), pas sur la fenêtre réellement affichée : sur NOX, une feuille
+// Neuro en 30s occupe le même écran qu'une feuille Respi en 4,94min, seule la densité
+// (px/seconde) change. Sans ce découplage, une fenêtre courte donnerait un canvas ~10x
+// plus étroit.
+const REF_WINDOW_MIN = 4.94;
+function applyLayout() {
+  const pxMin = Math.max(60, parseFloat($("pxmin").value) || 276);
+  document.documentElement.style.setProperty("--trace-w", Math.round(REF_WINDOW_MIN * pxMin) + "px");
+}
+
+boot();
+
+async function boot() {
+  try {
+    $("status").textContent = "lecture de l'en-tête…";
+    edf = await openRemoteEdf(EDF_URL);
+    montageData = await (await fetch(MONTAGE_URL)).json();
+    buildTabs();
+    loadSheet("Respi PSG");
+    try { scoring = await loadScoring(SCORING_URL); } catch (e) { console.warn("codage :", e.message); }
+    buildLegend();
+    $("nav").hidden = false;
+    $("tabs").hidden = false;
+    render();
+  } catch (err) {
+    console.error(err);
+    $("error").textContent = "Échec : " + (err.message || err) +
+      "\n(la page doit être servie : python3 serve.py, puis http://localhost:8000/tests/)";
+  }
+}
+
+function buildTabs() {
+  const tabs = $("tabs");
+  tabs.innerHTML = "";
+  for (const name of SHEETS) {
+    const btn = document.createElement("button");
+    btn.textContent = name;
+    btn.dataset.sheet = name;
+    btn.addEventListener("click", () => { loadSheet(name); render(); });
+    tabs.append(btn);
+  }
+}
+
+function loadSheet(name) {
+  mont = buildMontage(edf, montageData, name);
+  if (!mont.sheet) return;
+  [...$("tabs").children].forEach(b => b.classList.toggle("active", b.dataset.sheet === name));
+  autoScale.clear();
+  $("win").value = Math.round((mont.windowSec / 60) * 100) / 100;
+  applyLayout();
+  panels = mont.panels.map(p => ({ ...p, canvas: null }));
+  buildStack();
+  t0 = Math.max(0, Math.min(edf.totalDuration - winSec(), t0));
+  $("status").textContent =
+    `${fmtDur(edf.totalDuration)} · feuille « ${mont.sheet.name} » · fenêtre ${mont.sheet.window} · ` +
+    `début ${fmtClock(edf.startSecOfDay)}` + (scoring ? ` · ${scoring.events.length} évts` : "");
+}
+
+function buildStack() {
+  const stack = $("stack");
+  stack.innerHTML = "";
+  for (const p of panels) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const lbl = document.createElement("div");
+    lbl.className = "lbl" + (p.sig ? "" : " missing");
+    const filt = [];
+    if (p.hp) filt.push("HP " + p.hp);
+    if (p.lp) filt.push("LP " + p.lp);
+    if (p.range) filt.push("échelle fixe");
+    lbl.innerHTML = `<b>${p.label}</b><span>${p.sig ? p.sig.label : "canal absent"}` +
+      (filt.length ? " · " + filt.join(" ") : "") + `</span>`;
+    if (RESCALE_MODE_BY_TYPE[p.signalType]) {
+      const btn = document.createElement("button");
+      btn.className = "rescale";
+      btn.textContent = "Mise à l'échelle";
+      btn.addEventListener("click", () => {
+        if (autoScale.has(p.label)) autoScale.delete(p.label); else autoScale.add(p.label);
+        btn.classList.toggle("active", autoScale.has(p.label));
+        render();
+      });
+      lbl.append(btn);
+    }
+    const canvas = document.createElement("canvas");
+    row.append(lbl, canvas);
+    stack.append(row);
+    p.canvas = canvas;
+  }
+  const axis = document.createElement("div");
+  axis.className = "row axis";
+  axis.innerHTML = `<div class="lbl"></div><div class="ticks" id="ticks"></div>`;
+  stack.append(axis);
+
+  $("hypno").innerHTML =
+    `<div class="row"><div class="lbl"><b>Hypnogramme</b><span>stades + micro-éveils</span></div>` +
+    `<canvas id="hypnoCv"></canvas></div>`;
+}
+
+function buildLegend() {
+  const stages = Object.entries(STAGE_COLOR)
+    .map(([k, v]) => `<span style="color:${v}">■</span>${k.toUpperCase()}`).join(" ");
+  const evts = ["apnea-obstructive", "hypopnea", "rera", "oxygensaturation-drop", "snore-train", "arousal"]
+    .map(t => `<span style="color:${EVENT_STYLE[t].line}">■</span>${t}`).join(" ");
+  $("legend").innerHTML = `<b>Stades</b> ${stages} &nbsp; <b>Événements</b> ${evts}`;
+}
+
+function winSec() { return Math.max(30, (parseFloat($("win").value) || 5) * 60); }
+function goTo(sec) {
+  t0 = Math.max(0, Math.min(edf.totalDuration - winSec(), sec));
+  render();
+}
+$("prev").addEventListener("click", () => goTo(t0 - winSec()));
+$("next").addEventListener("click", () => goTo(t0 + winSec()));
+$("win").addEventListener("change", () => { applyLayout(); goTo(t0); });
+$("pxmin").addEventListener("change", () => { applyLayout(); render(); });
+$("showScore").addEventListener("change", render);
+$("goto").addEventListener("change", () => {
+  const v = $("goto").value.trim();
+  let s = null;
+  if (/^\d+$/.test(v)) s = +v;
+  else {
+    const m = v.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (m) {
+      const clk = (+m[1]) * 3600 + (+m[2]) * 60 + (+(m[3] || 0));
+      s = ((clk - edf.startSecOfDay) % 86400 + 86400) % 86400;
+    }
+  }
+  if (s != null) goTo(s);
+});
+
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+
+function readAt(start, dur) {
+  const idxs = [...new Set(panels.filter(p => p.sig).map(p => p.sig.index))];
+  return readWindow(edf, idxs, start, dur, { prerollSec: PREROLL });
+}
+
+// filtres d'affichage du montage NOX : _lff = passe-haut, _hff = passe-bas ; 0 = désactivé
+function condition(p, series, fs) {
+  let s = series;
+  if (p.inverted) { s = s.map(v => -v); }
+  if (p.hp && p.hp < fs / 2) s = highpass(s, fs, p.hp);
+  if (p.lp && p.lp < fs / 2) s = lowpass(s, fs, p.lp);
+  return s;
+}
+
+async function render() {
+  if (!edf) return;
+  const dur = Math.min(winSec(), edf.totalDuration - t0);
+  const key = `${t0}|${dur}`;
+
+  let win;
+  if (prefetch && prefetch.key === key) win = await prefetch.promise;
+  else win = await readAt(t0, dur);
+  const { byId, prerollById } = win;
+
+  panels.forEach(p => fitCanvas(p.canvas));
+
+  for (const p of panels) {
+    if (!p.sig) { clearCanvas(p.canvas); continue; }
+    if (p.label === "Position" && scoring && $("showScore").checked) {
+      const posEvents = scoring.events.filter(e => e.group === "position");
+      drawCategoryBand(p.canvas, posEvents, t0, dur, { labelFor: t => POSITION_LABEL[t] || t, colorFor: t => POSITION_COLOR[t] || "#888" });
+      continue;
+    }
+    const pre = prerollById[p.sig.index] || 0;
+    let s = condition(p, byId[p.sig.index], p.sig.fs);
+    if (pre) s = s.subarray ? s.subarray(pre) : s.slice(pre);
+    const rescaleMode = RESCALE_MODE_BY_TYPE[p.signalType];
+    let range;
+    if (rescaleMode === "auto") {
+      range = autoScale.has(p.label) ? [p.sig.pmin, p.sig.pmax] : null;
+    } else if (rescaleMode === "physical") {
+      range = autoScale.has(p.label) ? null : [p.sig.pmin, p.sig.pmax];
+    } else {
+      range = p.range;
+    }
+    drawWaves(p.canvas, [s], { colors: [p.color], range });
+    if (scoring && $("showScore").checked) {
+      const groups = Object.keys(GROUP_TO_PANEL).filter(g => GROUP_TO_PANEL[g].includes(p.label));
+      if (groups.length) drawEventOverlay(p.canvas, scoring.events, t0, dur, { groups });
+    }
+  }
+
+  const showHy = scoring && $("showScore").checked;
+  $("hypno").hidden = !showHy;
+  if (showHy) {
+    // fitCanvas ici, pas plus haut : tant que #hypno porte encore `hidden`,
+    // clientWidth/Height valent 0 et le canvas se calerait sur 1x1px.
+    fitCanvas($("hypnoCv"));
+    // Vision globale : toute la nuit à chaque rendu, pas seulement la fenêtre
+    // affichée par les tracés (ceux-ci restent sur t0/dur juste en dessous).
+    drawHypnogram($("hypnoCv"), scoring.hypnogram, 0, edf.totalDuration,
+      { arousals: scoring.events.filter(e => e.group === "arousal") });
+    // Repère de position : où se trouve la fenêtre actuellement affichée dans la nuit.
+    drawEventOverlay($("hypnoCv"), [{ t0, t1: t0 + dur, type: "fenêtre affichée", group: "currentwin" }],
+      0, edf.totalDuration,
+      { groups: ["currentwin"], outline: true, label: false, styleFor: () => ({ fill: "rgba(28,109,208,.10)", line: "#1c6dd0" }) });
+  }
+
+  const ticks = $("ticks");
+  ticks.innerHTML = "";
+  for (let k = 0; k <= 5; k++) {
+    const sp = document.createElement("span");
+    sp.textContent = fmtClock(edf.startSecOfDay + t0 + (k / 5) * dur);
+    ticks.append(sp);
+  }
+  const h = Math.floor(t0 / 3600), m = Math.floor((t0 % 3600) / 60);
+  $("clock").textContent =
+    `${fmtClock(edf.startSecOfDay + t0)} → ${fmtClock(edf.startSecOfDay + t0 + dur)}  (${h}h${String(m).padStart(2, "0")})`;
+
+  const nextT0 = Math.min(edf.totalDuration - dur, t0 + dur);
+  if (nextT0 > t0) prefetch = { key: `${nextT0}|${dur}`, promise: readAt(nextT0, dur) };
+}
+</script>
+
+</body>
+</html>
